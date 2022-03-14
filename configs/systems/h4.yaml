@@ -1,0 +1,29 @@
+system:
+  name: h4_plane
+  training:
+    collection_type: dynamic
+    n_configs: 16
+    config:
+      theta:
+        lower: 85
+        upper: 95
+        std: 0.5
+      R: 3.2843
+
+  validation:
+    collection_type: static
+    total_samples: 1000000
+    config:
+      theta:
+        - 85
+        - 86
+        - 87
+        - 88
+        - 89
+        - 90
+        - 91
+        - 92
+        - 93
+        - 94
+        - 95
+      R: 3.2843

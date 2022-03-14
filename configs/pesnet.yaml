@@ -1,0 +1,77 @@
+pesnet:
+    gnn_params:
+        layers: [[32, 64], [32, 64]]
+        embedding_dim: 64
+        out_mlp_depth: 2
+        msg_mlp_depth: 2
+        update_mlp_depth: 2
+        pos_encoding_config:
+            cutoff: 5.
+            n_sph: 7
+            n_rad: 6
+        activation: tanh
+        aggregate_before_out: True
+
+    ferminet_params:
+        determinants: 16
+        hidden_dims: [[256, 32], [256, 32], [256, 32], [256, 32]]
+        input_config:
+            nuclei_embedding: 64
+            out_dim: 64
+            mlp_depth: 2
+            activation: tanh
+            mlp_activation: tanh
+        activation: tanh
+
+    global_filter: >
+        {
+            'params': {
+                **{
+                    '$$$' + '$'*i: [
+                        {
+                            f'fermi_layers_{i}': {
+                                f'Dense_{i}': {
+                                    'bias': None
+                                }
+                                for i in range(3)
+                            }
+                        }
+                    ]
+                    for i in range(4)
+                },
+                'to_orbitals': {
+                    'Dense_0': {'bias': None},
+                    'Dense_1': {'bias': None},
+                },
+                '$': [
+                    {
+                        'input_construction': {
+                            'Dense_0': {
+                                'bias': None
+                            },
+                            **{
+                                f'MLP_{i}': {
+                                    f'Dense_{j}': {'bias': None }
+                                    for j in range(2)
+                                }
+                                for i in range(2)
+                            }
+                        }
+                    }
+                ],
+                'logsumdet': {
+                    'w': None
+                },
+                '$$': [
+                    {
+                        'jastrow': {
+                            f'Dense_{i}': {'bias': None}
+                            for i in range(3)
+                        }
+                    }
+                ],
+                'jastrow': {'Dense_2': {'kernel': None}}
+            }
+        }
+    include_default_filter: True
+    meta_network: gnn

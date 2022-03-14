@@ -1,0 +1,52 @@
+sampling:
+  init_width: 0.02
+  steps: 40
+
+optimization:
+  optimizer: sgd+clip
+  clip_local_energy: 5.0
+  clipping_method: ferminet
+  gradient: natural
+  max_norm: 1.0
+  accumulate_n: 1
+  lr:
+    init: 1.e-1
+    decay: 1.0
+    delay: 1000.0
+    gnn_prefactor: 1.0
+  cg:
+    damping:
+      method: std_based
+      init: 1.e-3
+      schedule:
+        delay: 1000.0
+        decay: 1.0
+        min: 1.e-5
+        schedule: hyperbola
+      adaptive:
+        step_size: 0.5
+        test_every: 50
+        threshold: 1.e-4
+      std_based:
+        base: 1.e-4
+    maxiter: 100
+    precondition: False
+
+training:
+  batch_size: 4096
+  val_batch_size: 4096
+  thermalizing_steps: 500
+  checkpoint_every: 1000
+  max_steps: 60000
+  patience: 20000
+  ema: 0.99
+  eps: 0.001
+
+pretraining:
+  steps: 2000
+  single: False
+  restricted: False
+  start_from_last: False
+  train_gnn: False
+
+log_every: 10

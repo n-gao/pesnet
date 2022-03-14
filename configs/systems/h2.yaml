@@ -1,0 +1,18 @@
+system:
+  name: H2
+  training:
+    n_configs: 16
+    config:
+      R:
+        lower: 0.7
+        upper: 3.6
+        std: 0.05
+
+  validation:
+    n_configs: 16
+    total_samples: 100000
+    config:
+      R:
+        lower: 0.7
+        upper: 3.6
+        std: 0.1
