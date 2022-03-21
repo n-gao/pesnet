@@ -28,7 +28,7 @@ h_rectangle:
         config:
           theta:
             lower: 85
-            upper: 95
+            upper: 90
             std: 0.5
           R: 3.2843
 
