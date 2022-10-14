@@ -245,7 +245,6 @@ class FermiNet(nn.Module):
     input_config: dict = field(default_factory=lambda *_: {
         'activation': 'tanh',
         'nuclei_embedding': 32,
-        'distance_embedding': 32,
         'out_dim': 32,
         'mlp_depth': 2
     })
