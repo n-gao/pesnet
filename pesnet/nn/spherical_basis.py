@@ -220,7 +220,7 @@ def make_real_sph_harm(l: int, spherical_coordinates: bool = False) -> Callable:
         Callable: real spherical harmonic function in JAX
     """
     sph_fns = [s[0] for s in real_sph_harm(
-        l,
+        l, 
         spherical_coordinates=spherical_coordinates
     )]
     if spherical_coordinates:

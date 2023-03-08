@@ -143,3 +143,9 @@ cython_debug/
 
 **/sacred_logs/
 tmp*
+
+**/model_load/
+*.pdf
+*.out
+
+**/notebooks/

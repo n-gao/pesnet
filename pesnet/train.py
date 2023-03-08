@@ -1,3 +1,6 @@
+import os
+os.environ['NVIDIA_TF32_OVERRIDE'] = '0'
+
 import functools
 import logging
 import os
@@ -8,22 +11,22 @@ import jax.numpy as jnp
 import matplotlib.pyplot as plt
 import numpy as np
 import seml
+from seml_logger import add_default_observer_config, automain, Logger
 import tqdm.auto as tqdm
 from sacred import Experiment
-from seml_logger import Logger, add_default_observer_config, automain
 
 from pesnet import nn, systems
-from pesnet.systems.collection import (JointCollection, StaticConfigs,
-                                       make_system_collection)
+from pesnet.systems.collection import JointCollection, StaticConfigs, make_system_collection
 from pesnet.systems.constants import HARTREE_TO_KCAL
 from pesnet.systems.scf import align_scfs
 from pesnet.trainer import VmcTrainer
-from pesnet.utils import ExponentiallyMovingAverage, Stopwatch
+from pesnet.utils import (ExponentiallyMovingAverage, Stopwatch)
 from pesnet.utils.jax_utils import broadcast, replicate
 from pesnet.vmc.eval import eval_energy_sequential
 from pesnet.vmc.training import coordinate_transform, init_electrons
 
 jax.config.update('jax_default_matmul_precision', 'float32')
+jax.config.update('jax_array', False)
 
 ex = Experiment()
 seml.setup_logger(ex)

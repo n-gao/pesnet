@@ -3,19 +3,21 @@ This file contains utility classes to deal with collections
 of configurations. There are two types of collections, static
 and dynamic configurations.
 """
+from functools import cached_property
 import numbers
 from copy import deepcopy
+from typing import Tuple
 
 import jax.numpy as jnp
 import numpy as np
+from pesnet import systems
+from pesnet.utils import merge_dictionaries
 
 
 class ConfigCollection:
-    """
-    Interface for groups of molecular configurations.
-    """
     def __init__(self, constructor) -> None:
-        # Constructor is some function which returns an molecule.
+        if isinstance(constructor, str):
+            constructor = getattr(systems, constructor)
         self.constructor = constructor
 
     def update_configs(self):
@@ -24,7 +26,7 @@ class ConfigCollection:
     def get_current_configs(self):
         return self.sub_configs
 
-    def get_current_histograms(self, n_bins):
+    def get_current_conf_vals(self):
         raise NotImplementedError()
 
     def get_current_systems(self):
@@ -34,9 +36,6 @@ class ConfigCollection:
         ]
 
     def get_current_atoms(self, n_devices=None):
-        # Returns the atom positions of all current configs
-        # and formats the tensor such that it is directly useable in
-        # pmapped functions.
         result = systems_to_coords(self.get_current_systems())
         if n_devices is not None:
             assert self.n_configs % n_devices == 0
@@ -92,17 +91,14 @@ class StaticConfigs(ConfigCollection):
                 for conf in self.sub_configs:
                     conf[key] = val
 
-    def get_current_histograms(self, n_bins):
+    def get_current_conf_vals(self):
         result = {
             k: v for k, v in self.config.items()
             if isinstance(v, list) and
             all([isinstance(o, numbers.Number) for o in v])
         }
         result = {
-            k: {
-                'bins': np.linspace(np.min(v), np.max(v), n_bins),
-                'values': np.array(v).reshape(-1)
-            }
+            k: np.array(v).reshape(-1)
             for k, v in result.items()
         }
         return result
@@ -131,10 +127,11 @@ class DynamicConfigs(ConfigCollection):
     n_configs=16
     """
 
-    def __init__(self, constructor, config, n_configs: int, **kwargs) -> None:
+    def __init__(self, constructor, config, n_configs: int, deterministic: bool = False, **kwargs) -> None:
         super().__init__(constructor)
         self.config = config
         self.n_configs = n_configs
+        self.deterministic = deterministic
         self.gen_subconfigs()
 
     def gen_subconfigs(self):
@@ -159,22 +156,22 @@ class DynamicConfigs(ConfigCollection):
         if len(self.keys) == 0:
             self.values = None
             return
-        assert (self.n_configs**(1./len(self.keys))) % 1 == 0
-        n_splits = int(self.n_configs ** (1./len(self.keys))) + 1
+        assert round(self.n_configs**(1/len(self.keys))) % 1 == 0
+        n_splits = int(np.around(self.n_configs**(1./len(self.keys)), 7)) + 1
         self.cell_limits = np.linspace(self.lowers, self.uppers, n_splits).T
         self.feature_bins = np.stack(np.meshgrid(*self.cell_limits), -1)
         max_slices = tuple(slice(1, None, 1) for _ in self.keys)
         min_slices = tuple(slice(0, -1, 1) for _ in self.keys)
         self.upper_bounds = self.feature_bins[max_slices]
         self.lower_bounds = self.feature_bins[min_slices]
-        self.values = (self.upper_bounds - self.lower_bounds) / \
-            2 + self.lower_bounds
+        if self.deterministic:
+            self.values = 0.5 * (self.upper_bounds -
+                                 self.lower_bounds) + self.lower_bounds
+        else:
+            self.values = np.random.rand(
+                *self.lower_bounds.shape) * (self.upper_bounds - self.lower_bounds) + self.lower_bounds
 
     def update_configs(self):
-        """
-        Performs an update step where we move each config within its grid cell
-        by some random pertrubation.
-        """
         if self.values is not None:
             updates = self.stds[tuple(
                 None for _ in self.stds)] * np.random.randn(*self.values.shape)
@@ -202,15 +199,82 @@ class DynamicConfigs(ConfigCollection):
                     r[k] = vals[i, j]
         return result
 
-    def get_current_histograms(self, n_bins):
+    def get_current_conf_vals(self):
         result = {}
         for i, k in enumerate(self.keys):
-            bins = np.linspace(self.lowers[i], self.uppers[i], n_bins)
-            result[k] = {
-                'bins': bins,
-                'values':  self.values[..., i].reshape(-1)
-            }
+            result[k] = self.values[..., i].reshape(-1)
         return result
+
+
+class JointCollection:
+    """
+    A collection of collections. The subcollections are merged and treated as one large collection.
+    This is useful if one wants to merge multiple static and dynamic configs.
+
+    An example for two ethanol states
+    constructor='ethanol'
+    # Config is merged with the sub_systems
+    config={
+        'angle': {
+            'lower': 0,
+            'upper': 360,
+            'std': 2
+        }
+    }
+    # subconfigs are merged with the general config
+    sub_systems=[
+        {
+            'config': {
+                'state': 'Gauche'
+            }
+        },
+        {
+            'config': {
+                'state': 'Trans'
+            }
+        },
+    ]
+    n_configs=16
+    """
+    def __init__(self, collections: Tuple[ConfigCollection, ...]) -> None:
+        self.collections = collections
+
+    def update_configs(self):
+        for col in self.collections:
+            col.update_configs()
+
+    def get_current_configs(self):
+        result = []
+        for col in self.collections:
+            result += col.get_current_configs()
+        return result
+
+    def get_current_conf_vals(self):
+        result = {}
+        for i, col in enumerate(self.collections):
+            for k, v in col.get_current_conf_vals().items():
+                result[f'{i}/{k}'] = v
+        return result
+
+    def get_current_systems(self):
+        result = []
+        for col in self.collections:
+            result += col.get_current_systems()
+        return result
+
+    def get_current_atoms(self, n_devices=None):
+        result = []
+        for col in self.collections:
+            result.append(col.get_current_atoms(None))
+        result = jnp.concatenate(result, axis=0)
+        if n_devices is not None:
+            assert result.shape[0] % n_devices == 0
+            return result.reshape(n_devices, result.shape[0]//n_devices, -1, 3)
+        return result
+    
+    @cached_property
+    def sub_system_counts(self):
+        return [len(col.get_current_configs()) for col in self.collections]
 
 
 def make_system_collection(constructor, collection_type=None, **kwargs):
@@ -218,12 +282,16 @@ def make_system_collection(constructor, collection_type=None, **kwargs):
         return DynamicConfigs(constructor, **kwargs)
     elif collection_type.lower() == 'static':
         return StaticConfigs(constructor, **kwargs)
+    elif collection_type.lower() == 'joint':
+        fwd_args = deepcopy(kwargs)
+        del fwd_args['sub_systems']
+        return JointCollection([make_system_collection(constructor, **merge_dictionaries(fwd_args, sub_conf)) for sub_conf in kwargs['sub_systems']])
     else:
         raise ValueError()
 
 
 def systems_to_coords(systems):
-    return jnp.stack([
+    return jnp.array(np.stack([
         s.coords()
         for s in systems
-    ], axis=0)
+    ], axis=0))

@@ -1,0 +1,125 @@
+seml:
+  executable: train.py
+  name: N2_ablation
+  output_dir: ~/slurm-output
+  project_root_dir: .
+  conda_environment: pesnet
+
+slurm:
+  experiments_per_job: 1
+  sbatch_options:
+    gres: gpu:1
+    mem: 16G
+    cpus-per-task: 16
+    time: 14-00:00
+    partition: gpu_large
+    exclude: gpu[15,17,20]
+    
+fixed:
+  training.max_steps: 60000
+  pesnet.ferminet_params.determinants: 32
+  training.checkpoint_every: 1000
+
+  system:
+    name: diatomic
+    training:
+      collection_type: dynamic
+      n_configs: 16
+      config:
+        symbol1: N
+        symbol2: N
+        R:
+          lower: 1.4
+          upper: 6.5
+          std: 0.05
+
+    validation:
+      collection_type: static
+      n_configs: 16
+      total_samples: 1000000
+      config:
+        symbol1: N
+        symbol2: N
+        R:
+          - 1.60151
+          - 1.70828
+          - 1.81505
+          - 1.92181
+          - 2.02858
+          - 2.13535
+          - 2.24212
+          - 2.34889
+          - 2.45565
+          - 2.56242
+          - 2.66919
+          - 2.77595
+          - 2.88272
+          - 2.98949
+          - 3.09626
+          - 3.20302
+          - 3.30979
+          - 3.41656
+          - 3.52333
+          - 3.63009
+          - 3.73686
+          - 3.84363
+          - 3.95040
+          - 4.05716
+          - 4.16393
+          - 4.27070
+          - 4.37747
+          - 4.48423
+          - 4.59100
+          - 4.69777
+          - 4.80454
+          - 4.91130
+          - 5.01807
+          - 5.12484
+          - 5.23161
+          - 5.33837
+          - 5.87221
+          - 6.40605
+
+  naming:
+    - init_method
+    - pesnet.ferminet_params.activation
+    - pesnet.ferminet_params.jastrow_config.n_layers
+
+pesnet:
+  fixed:
+    init_method: pesnet
+    pesnet:
+      gnn_params.activation: tanh
+      ferminet_params.activation: tanh
+      ferminet_params.input_config.mlp_activation: tanh
+      ferminet_params.jastrow_config: null
+
+silu:
+  fixed:
+    init_method: pesnet
+    pesnet:
+      gnn_params.activation: tanh
+      ferminet_params.activation: silu
+      ferminet_params.input_config.mlp_activation: silu
+      ferminet_params.jastrow_config: null
+
+init:
+  fixed:
+    init_method: default
+    pesnet:
+      gnn_params.activation: tanh
+      ferminet_params.activation: silu
+      ferminet_params.input_config.mlp_activation: silu
+      ferminet_params.jastrow_config: null
+
+jastrow:
+  fixed:
+    init_method: default
+    pesnet:
+      gnn_params.activation: tanh
+      ferminet_params.activation: silu
+      ferminet_params.input_config.mlp_activation: silu
+      ferminet_params.jastrow_config:
+        n_layers: 3
+        activation: silu
+

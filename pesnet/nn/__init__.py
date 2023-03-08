@@ -2,42 +2,21 @@ import functools
 from typing import Any, Callable, Iterable, Mapping, Sequence, Union
 
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 import numpy as np
-from jax.nn.initializers import normal, variance_scaling, zeros
+from jax.nn.initializers import normal, orthogonal, variance_scaling
 
-Activation = Union[str, Callable[[jnp.ndarray], jnp.ndarray]]
-ParamTree = Union[jnp.ndarray,
+Activation = Union[str, Callable[[jax.Array], jax.Array]]
+ParamTree = Union[jax.Array,
                   Iterable['ParamTree'],
                   Mapping[Any, 'ParamTree']]
 
-Dense = functools.partial(
-    nn.Dense,
-    kernel_init=variance_scaling(
-        1/2,
-        mode="fan_in",
-        distribution="truncated_normal"
-    ),
-    bias_init=normal(1/np.sqrt(2))
-)
-Dense_no_bias = functools.partial(
-    nn.Dense,
-    kernel_init=variance_scaling(
-        1,
-        mode="fan_in",
-        distribution="truncated_normal"
-    ),
-    bias_init=zeros
-)
-
-def none(x):
-    return x
-
 
 ACTIVATION_GAINS = {
+    nn.silu: 1.7868129431578026,
     nn.tanh: 1.5927812698663606,
-    nn.sigmoid: 4.801203511726151,
-    none: 1,
+    nn.sigmoid: 4.801203511726151
 }
 
 
@@ -54,18 +33,84 @@ def activation_function(fn: Union[str, Activation]):
             return getattr(jnp, fn)
 
 
+_LAYERS = {
+    'Dense': nn.Dense,
+    'Dense_no_bias': functools.partial(nn.Dense, use_bias=False)
+}
+
+Dense = lambda *args, **kwargs: _LAYERS['Dense'](*args, **kwargs)
+Dense_no_bias = lambda *args, **kwargs: _LAYERS['Dense_no_bias'](*args, **kwargs)
+Embed = nn.Embed
+
+
+def glorot_orthogonal(scale=2.0):
+    base = orthogonal()
+    def _glorot_orthogonal(key, shape, dtype=jnp.float32):
+        assert len(shape) == 2
+        W = base(key, shape, dtype)
+        W *= jnp.sqrt(scale / ((shape[0] + shape[1]) * jnp.var(W)))
+        return W
+    return _glorot_orthogonal
+
+
+
+def set_init_method(method: str = 'default'):
+    """
+    Globally set the initialization method for dense layers.
+    """
+    if method == 'default':
+        _LAYERS['Dense'] = nn.Dense
+        _LAYERS['Dense_no_bias'] = functools.partial(nn.Dense, use_bias=False)
+    elif method == 'ferminet':
+        _LAYERS['Dense'] = functools.partial(
+            nn.Dense,
+            kernel_init=variance_scaling(
+                1,
+                mode="fan_in",
+                distribution="truncated_normal"
+            ),
+            bias_init=normal(1)
+        )
+        _LAYERS['Dense_no_bias'] = functools.partial(nn.Dense, use_bias=False)
+    elif method == 'pesnet':
+        _LAYERS['Dense'] = functools.partial(
+            nn.Dense,
+            kernel_init=variance_scaling(
+                1/2,
+                mode="fan_in",
+                distribution="truncated_normal"
+            ),
+            bias_init=normal(1/np.sqrt(2))
+        )
+        _LAYERS['Dense_no_bias'] = functools.partial(nn.Dense, use_bias=False)
+    elif method == 'orthogonal':
+        _LAYERS['Dense'] = functools.partial(
+            nn.Dense,
+            kernel_init=orthogonal()
+        )
+        _LAYERS['Dense_no_bias'] = functools.partial(Dense, use_bias=False)
+    elif method == 'orthogonal_glorot':
+        _LAYERS['Dense'] = functools.partial(
+            nn.Dense,
+            kernel_init=glorot_orthogonal()
+        )
+        _LAYERS['Dense_no_bias'] = functools.partial(Dense, use_bias=False)
+    else:
+        raise ValueError()
+
+
 def residual(
-    x: jnp.ndarray,
-    y: jnp.ndarray
-) -> jnp.ndarray:
+    x: jax.Array,
+    y: jax.Array
+) -> jax.Array:
     """Adds a residual connection between input x and output y if possible.
 
     Args:
-        x (jnp.ndarray): input
-        y (jnp.ndarray): output
+        x (jax.Array): input
+        y (jax.Array): output
 
     Returns:
-        jnp.ndarray: new output
+        jax.Array: new output
     """
     if x.shape == y.shape:
         return (x + y) / jnp.sqrt(2.0)
@@ -102,6 +147,8 @@ class MLP(nn.Module):
 
 
 class AutoMLP(nn.Module):
+    # MLP class which automatically infers hidden dimensions based on the input output dimension
+    # and the number of intermediate layers.
     out_dim: int
     n_layers: int
     activation: Activation
@@ -151,12 +198,16 @@ class AutoMLP(nn.Module):
 
 
 class ActivationWithGain(nn.Module):
+    # Rescaled activation function such that the output standard deviation is approx. 1.
     activation: Activation
 
     @nn.compact
     def __call__(self, x):
         activation = activation_function(self.activation)
-        return activation(x) * ACTIVATION_GAINS[activation]
+        if isinstance(activation, nn.Module) or activation not in ACTIVATION_GAINS:
+            return activation(x)
+        else:
+            return activation(x) * ACTIVATION_GAINS[activation]
 
 
 def named(name, module, *args, **kwargs):
@@ -164,6 +215,7 @@ def named(name, module, *args, **kwargs):
 
 
 class BesselRBF(nn.Module):
+    # Bessel RBF from Gasteiger et al. 2020
     out_dim: int
     cutoff: float
 
@@ -183,3 +235,11 @@ class BesselRBF(nn.Module):
         x_ext = x[..., None] + 1e-8
         result = jnp.sqrt(2./c) * jnp.sin(f*x_ext/c)/x_ext
         return result.reshape(*x.shape, -1)
+
+
+def constant_init(val):
+    # We use our own constant init instead the one from jnn.initializers.constant
+    # because of backwards compatability
+    def init_fn(key, shape, dtype=jnp.float32):
+        return jnp.full(shape, val, dtype=dtype)
+    return init_fn

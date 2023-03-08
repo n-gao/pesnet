@@ -1,0 +1,11 @@
+system:
+  name: atomic
+  training:
+    collection_type: static
+    config:
+      symbol: ['O']
+
+  validation:
+    collection_type: static
+    config:
+      symbol: ['O']

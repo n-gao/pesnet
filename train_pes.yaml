@@ -1,22 +1,17 @@
 seml:
   executable: train.py
-  name: pesnet
+  name: pes
   output_dir: ~/slurm-output
-  conda_environment: pn
   project_root_dir: .
 
 slurm:
-  experiments_per_job: 1
   sbatch_options:
-    gres: gpu:1
-    mem: 16G
-    cpus-per-task: 16
-    time: 14-00:00
-    partition: gpu_large
-    exclude: gpu[15,17,20]
+    gres: gpu:2
+
 
 fixed:
   training.max_steps: 60000
+  log_energies: True
 
 h_rectangle:
   fixed:
@@ -27,7 +22,7 @@ h_rectangle:
         n_configs: 16
         config:
           theta:
-            lower: 85
+            lower: 82
             upper: 90
             std: 0.5
           R: 3.2843
@@ -53,7 +48,7 @@ h_rectangle:
 h4plus:
   fixed:
     system:
-      name: h4plus
+      name: H4plus
       training:
         collection_type: static
         config:
@@ -531,8 +526,8 @@ h_chain:
         config:
           n: 10
           R:
-            lower: 1.0
-            upper: 3.6
+            lower: 0.9
+            upper: 3.8
             std: 0.05
 
       validation:
@@ -564,8 +559,8 @@ nitrogen:
           symbol1: N
           symbol2: N
           R:
-            lower: 1.4
-            upper: 6.5
+            lower: 1.5
+            upper: 6.7
             std: 0.05
 
       validation:
@@ -615,28 +610,242 @@ nitrogen:
             - 5.87221
             - 6.40605
 
-cyclobutadiene:
+li2:
   fixed:
-    pesnet.ferminet_params.determinants: 32
-    pesnet.ferminet_params.hidden_dims:
-      [[512, 32], [512, 32], [512, 32], [512, 32]]
-
-    comparison_idx: 0
-    log_every: 1
-
     system:
-      name: cyclobutadiene
+      name: diatomic
       training:
-        collection_type: static
+        n_configs: 16
         config:
-          state:
-            - ground
-            - transition
+          symbol1: 'Li'
+          symbol2: 'Li'
+          R:
+            lower: 3.5
+            upper: 14.5
+            std: 0.2
 
       validation:
-        collection_type: static
         total_samples: 1000000
+        collection_type: static
         config:
-          state:
-            - ground
-            - transition
+          symbol1: 'Li'
+          symbol2: 'Li'
+          R:
+          - 3.7419354838709675
+          - 4.083870967741936
+          - 4.425806451612903
+          - 4.767741935483871
+          - 5.05176690 # equilibrium
+          - 5.109677419354838
+          - 5.451612903225806
+          - 5.793548387096774
+          - 6.135483870967741
+          - 6.477419354838709
+          - 6.8193548387096765
+          - 7.161290322580645
+          - 7.5032258064516135
+          - 7.845161290322581
+          - 8.187096774193549
+          - 8.529032258064516
+          - 8.870967741935484
+          - 9.212903225806452
+          - 9.55483870967742
+          - 9.896774193548387
+          - 10.238709677419354
+          - 10.580645161290322
+          - 10.92258064516129
+          - 11.264516129032257
+          - 11.606451612903227
+          - 11.948387096774194
+          - 12.290322580645162
+          - 12.63225806451613
+          - 12.974193548387097
+          - 13.316129032258065
+          - 13.658064516129032
+          - 14.0
+
+2d:
+  fixed:
+    system:
+      name: H2HF
+      training:
+        n_configs: 64
+        config:
+          r1: 1.40501
+          r2: 1.73496
+          rr: 
+            lower: 3
+            upper: 5.5
+            std: 0.1
+          phi: 0
+          th1:
+            lower: 0
+            upper: 180
+            std: 10
+          th2: 180
+
+      validation:
+        total_samples: 1000000
+        n_configs: 64
+        config:
+          r1: 1.40501
+          r2: 1.73496
+          rr: 
+            lower: 3
+            upper: 5
+            std: 0.1
+          phi: 0
+          th1:
+            lower: 0
+            upper: 180
+            std: 10
+          th2: 180
+
+
+3d:
+  fixed:
+    system:
+      name: H2HF
+      training:
+        n_configs: 64
+        config:
+          r1: 1.40501
+          r2: 1.73496
+          rr: 
+            lower: 3
+            upper: 5.5
+            std: 0.1
+          phi: 0
+          th1:
+            lower: 0
+            upper: 180
+            std: 10
+          th2:
+            lower: 0
+            upper: 180
+            std: 10
+
+
+      validation:
+        total_samples: 1000000
+        n_configs: 64
+        config:
+          r1: 1.40501
+          r2: 1.73496
+          rr: 
+            lower: 3
+            upper: 5
+            std: 0.1
+          phi: 0
+          th1:
+            lower: 0
+            upper: 180
+            std: 10
+          th2:
+            lower: 0
+            upper: 180
+            std: 10
+
+
+
+6d:
+  fixed:
+    system:
+      name: H2HF
+      training:
+        n_configs: 64
+        config:
+          r1:
+            lower: 1.2
+            upper: 1.8
+            std: 0.1
+          r2:
+            lower: 1.2
+            upper: 1.8
+            std: 0.1
+          rr:
+            lower: 3.0
+            upper: 8.0
+            std: 0.5
+          th1:
+            lower: 0
+            upper: 180
+            std: 10
+          th2:
+            lower: 0
+            upper: 180
+            std: 10
+          phi:
+            lower: 0
+            upper: 180
+            std: 10
+
+
+      validation:
+        total_samples: 1000000
+        n_configs: 64
+        config:
+          r1:
+            lower: 1.2
+            upper: 1.8
+            std: 0.1
+          r2:
+            lower: 1.2
+            upper: 1.8
+            std: 0.1
+          rr:
+            lower: 3.0
+            upper: 8.0
+            std: 0.5
+          th1:
+            lower: 0
+            upper: 180
+            std: 10
+          th2:
+            lower: 0
+            upper: 180
+            std: 10
+          phi:
+            lower: 0
+            upper: 180
+            std: 10
+
+ethanol:
+  fixed:
+    system:
+      name: ethanol
+      training:
+        collection_type: joint
+        n_configs: 16
+        config:
+          angle:
+            lower: 0
+            upper: 360
+            std: 2
+        sub_systems:
+          - config:
+              state: Gauche
+          - config:
+              state: Trans
+          - config:
+              state: TS1
+          - config:
+              state: TS2
+      validation:
+        collection_type: joint
+        total_samples: 1_000_000
+        n_configs: 64
+        config:
+          angle:
+            lower: 0
+            upper: 360
+            std: 2
+        sub_systems:
+          - config:
+              state: Gauche
+          - config:
+              state: Trans
+          - config:
+              state: TS1
+          - config:
+              state: TS2

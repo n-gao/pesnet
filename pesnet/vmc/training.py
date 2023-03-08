@@ -1,33 +1,34 @@
+import functools
 import numbers
-from typing import Callable, Tuple
+from typing import Callable, Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
 
-from pesnet.jax_utils import pmean_if_pmap
-from pesnet.jnp_utils import tree_add, tree_dot, tree_mul, tree_sub
-from pesnet.optim import cg
+from pesnet.utils.jax_utils import pmean_if_pmap
+from pesnet.utils.jnp_utils import tree_add, tree_dot, tree_mul
+from pesnet.utils.optim import cg
 
 
 def local_energy_diff(
-        e_loc: jnp.ndarray,
+        e_loc: jax.Array,
         clip_local_energy: float,
         method: str = 'ferminet'
-) -> jnp.ndarray:
+) -> jax.Array:
     """Different local energy clipping methods. Implemented is the
     one from FermiNet, PauliNet and one based on FermiNet but with
     the median instead of the mean.
 
     Args:
-        e_loc (jnp.ndarray): Local energies
+        e_loc (jax.Array): Local energies
         clip_local_energy (float): Clipping range
         method (str, optional): method, one of 'ferminet', 
           'paulinet', 'median' or 'none'. Defaults to 'ferminet'.
 
     Returns:
-        jnp.ndarray: clipped local energy
+        jax.Array: clipped local energy
     """
     if method is not None:
         method = method.lower()
@@ -43,7 +44,7 @@ def local_energy_diff(
             e_loc_center = jnp.median(e_loc, axis=-1, keepdims=True)
             if e_loc.ndim == 1:
                 e_loc_center = pmean_if_pmap(e_loc_center)
-
+        
         e_loc -= e_loc_center
         if clip_local_energy > 0.0:
             tv = mean_fn(jnp.abs(e_loc))
@@ -120,9 +121,7 @@ def make_loss_and_natural_gradient_fn(
         maxiter=100,
         min_lookback: float = 10,
         lookback_frac: float = 0.1,
-        eps: float = 5e-6,
-        center: bool = False,
-        precondition: bool = False,
+        eps: float = 1e-7,
         **kwargs):
     """Create loss and gradient function for natural gradient descent.
 
@@ -138,8 +137,6 @@ def make_loss_and_natural_gradient_fn(
         lookback_frac (float, optional): CG stopping criteria, 
             fraction of iterations to lookback. Defaults to 0.1.
         eps (float, optional): CG epsilon value. Defaults to 5e-6.
-        center (bool, optional): Whether to center activations and sensitivities. Defaults to False.
-        precondition (bool, optional): Whether to use a preconditioner. Defaults to False.
 
     Returns:
         Callable: loss and gradient function
@@ -147,6 +144,7 @@ def make_loss_and_natural_gradient_fn(
     batched_network = jax.jit(batched_network)
 
     def nat_cg(t, params, electrons, atoms, e_l, last_grad, damping):
+        aux_data = {}
         n = e_l.size
 
         def log_p_closure(p): return batched_network(
@@ -159,45 +157,37 @@ def make_loss_and_natural_gradient_fn(
             result = jnp.vdot(log_psi, diff)/n
             return result
         grad = jax.grad(loss)(params)
-
-        if center:
-            mean_grads = jax.grad(lambda p: log_p_closure(p).sum())(params)
+        grad = pmean_if_pmap(grad)
 
         _, vjp_fn = jax.vjp(log_p_closure, params)
 
-        if precondition:
-            F_diag_sqrt = jax.grad(lambda p: log_p_closure(p).sum())(params)
-            F_inv_diag = jax.tree_map(
-                lambda x: n/(x**2 + damping), F_diag_sqrt)
-
-            def preconditioner(x):
-                return jax.tree_multimap(lambda a, b: b*a, F_inv_diag, x)
-        else:
-            preconditioner = None
-
-        @jax.jit
-        def Fisher_matmul(v):
+        def Fisher_matmul(v, damping: float = 0):
             w = jax.jvp(log_p_closure, (params,), (v,))[1] / n
+
             uncentered = vjp_fn(w)[0]
 
             result = tree_add(uncentered, tree_mul(v, damping))
-
-            if center:
-                mg_v = tree_dot(mean_grads, v) / n
-                result = tree_sub(result, tree_mul(mean_grads, mg_v))
-            return result
-
-        nat_grad = cg(
-            A=Fisher_matmul,
+            return pmean_if_pmap(result)
+        
+        # Compute natural gradient
+        grad = cg(
+            A=functools.partial(Fisher_matmul, damping=damping),
             b=grad,
             x0=last_grad,
             min_lookback=min_lookback,
             lookback_frac=lookback_frac,
             eps=eps,
             maxiter=maxiter,
-            M=preconditioner
+            fixed_iter=jax.device_count() > 1
         )[0]
-        return pmean_if_pmap(jnp.mean(e_l)), nat_grad
+        
+        # Aux data
+        aux_data['grad_norm'] = {
+            'final': jnp.sqrt(tree_dot(grad, grad))
+        }
+        aux_data['damping'] = damping
+
+        return (jnp.mean(e_l), grad), aux_data
     return nat_cg
 
 
@@ -227,25 +217,25 @@ def make_training_step(
 
         e_l = el_fn(params, electrons, atoms)
 
+        aux_data = {}
         if uses_cg:
             # If we use CG we've wrapped the value function by adaptive damping
             grad_and_damping = val_and_grad
             key, subkey = jax.random.split(key)
-            grads, damping = grad_and_damping(
+            (_, grads, damping), aux_data = grad_and_damping(
+                key=subkey,
                 damping=damping,
+                opt_state=opt_state,
                 t=t,
                 params=params,
                 electrons=electrons,
                 atoms=atoms,
                 e_l=e_l,
+                mcmc_width=mcmc_width,
                 last_grad=last_grad)
         else:
             _, grads = val_and_grad(params,  electrons, atoms, e_l)
 
-        # Mean gradients
-        # Is meaning gradients or meaning parameters preferred?
-        # Probably gradients so the optimizer state is identical
-        grads = pmean_if_pmap(grads)
         if uses_cg:
             train_state = {
                 'last_grad': grads,
@@ -268,17 +258,16 @@ def make_training_step(
         updates, opt_state = opt_update(grads, opt_state, params)
 
         params = optax.apply_updates(params, updates)
-        params = pmean_if_pmap(params)
-        return (electrons, params, opt_state, E, E_var, pmove), train_state
+        return (electrons, params, opt_state, e_l, E, E_var, pmove, train_state), aux_data
     return step
 
 
 def init_electrons(
-        atom_positions: jnp.ndarray,
-        charges: jnp.ndarray,
+        atom_positions: jax.Array,
+        charges: jax.Array,
         spins: Tuple[int, int],
         batch_size: int,
-        key: jnp.ndarray) -> jnp.ndarray:
+        key: jax.Array) -> jax.Array:
     """Initializes electron positions by normal distributions
     around the nuclei. For heavy atoms this function tries to
     match the number of spin up and spin down electrons per 
@@ -286,14 +275,14 @@ def init_electrons(
     spin up and one only spin down electrons.
 
     Args:
-        atom_positions (jnp.ndarray): (..., M, 3)
-        charges (jnp.ndarray): (M)
+        atom_positions (jax.Array): (..., M, 3)
+        charges (jax.Array): (M)
         spins (Tuple[int, int]): (spin_up, spin_down)
         batch_size (int): total batch size
-        key (jnp.ndarray): jax.random.PRNGKey
+        key (jax.Array): jax.random.PRNGKey
 
     Returns:
-        jnp.ndarray: (..., batch_size//len(...), N, 3)
+        jax.Array: (..., batch_size//len(...), N, 3)
     """
     n_electrons = sum(spins)
     if atom_positions.ndim > 2:
@@ -313,72 +302,49 @@ def init_electrons(
         if sum(charges) != n_electrons:
             p = jnp.array(charges)/sum(charges)
             key, subkey = jax.random.split(key)
-            atom_idx = jax.random.choice(subkey, jnp.arange(
-                a_p.shape[0]), shape=(batch_size_per_config, n_electrons), replace=True, p=p)
+            atom_idx = jax.random.choice(subkey,
+                a_p.shape[0], shape=(batch_size_per_config, n_electrons), replace=True, p=p)
         else:
             charges = np.array(charges)
-            atom_idx = np.zeros(
-                (batch_size_per_config, n_electrons), dtype=jnp.int32)
-            for k in range(batch_size_per_config):
-                nalpha = np.ceil(charges/2).astype(jnp.int32)
-                nbeta = np.floor(charges/2).astype(jnp.int32)
-                assert sum(nalpha) + sum(nbeta) == sum(spins)
-                while (sum(nalpha), sum(nbeta)) != spins:
-                    key, subkey = jax.random.split(key)
-                    i = jax.random.randint(subkey, (), 0, len(nalpha))
-                    a, b = nalpha[i], nbeta[i]
-                    nalpha[i], nbeta[i] = b, a
-                alpha_idx = jnp.array([
-                    i for i in range(len(nalpha))
-                    for _ in range(nalpha[i])
-                ])
-                beta_idx = jnp.array([
-                    i for i in range(len(nbeta))
-                    for _ in range(nbeta[i])
-                ])
-                atom_idx[k] = jnp.concatenate([alpha_idx, beta_idx])
-            atom_idx = jnp.array(atom_idx)
-
+            atom_idx = np.zeros((batch_size_per_config, n_electrons), dtype=np.int32)
+            nalpha = np.ceil(charges/2).astype(jnp.int32)
+            nbeta = np.floor(charges/2).astype(jnp.int32)
+            assert sum(nalpha) + sum(nbeta) == sum(spins)
+            while (sum(nalpha), sum(nbeta)) != spins:
+                key, subkey = jax.random.split(key)
+                i = jax.random.randint(subkey, (), 0, len(nalpha))
+                a, b = nalpha[i], nbeta[i]
+                nalpha[i], nbeta[i] = b, a
+            alpha_idx = jnp.array([
+                i for i in range(len(nalpha))
+                for _ in range(nalpha[i])
+            ])
+            beta_idx = jnp.array([
+                i for i in range(len(nbeta))
+                for _ in range(nbeta[i])
+            ])
+            atom_idx[:] = jnp.concatenate([alpha_idx, beta_idx])
+            
         electrons.append(a_p[atom_idx].reshape(
             batch_size_per_config, n_electrons*3))
     electrons = jnp.array(electrons).reshape(
         *config_shape, batch_size_per_config, n_electrons*3)
     key, subkey = jax.random.split(key)
-    return electrons + jax.random.normal(subkey, shape=electrons.shape)*0.8
+    return electrons + jax.random.normal(subkey, shape=electrons.shape) * 1.6
 
 
-def make_schedule(params: dict) -> Callable[[int], float]:
-    """Simple function to create different kind of schedules.
-
-    Args:
-        params (dict): Parameters for the schedules.
-
-    Returns:
-        Callable[[int], float]: schedule function
-    """
-    if isinstance(params, numbers.Number):
-        def result(t): return params
-    elif callable(params):
-        result = params
-    elif isinstance(params, dict):
-        if 'schedule' not in params or params['schedule'] == 'hyperbola':
-            assert 'init' in params
-            assert 'delay' in params
-            init = params['init']
-            delay = params['delay']
-            decay = params['decay'] if 'decay' in params else 1
-            def result(t): return init * jnp.power(1/(1 + t/delay), decay)
-        elif params['schedule'] == 'exponential':
-            assert 'init' in params
-            assert 'delay' in params
-            init = params['init']
-            delay = params['delay']
-            def result(t): return init * jnp.exp(-t/delay)
-        else:
-            raise ValueError()
-        if 'min' in params:
-            val_fn = result
-            def result(t): return jnp.maximum(val_fn(t), params['min'])
-    else:
-        raise ValueError()
-    return result
+@jax.jit
+def coordinate_transform(old_atoms, new_atoms, electrons):
+    n_leading_dims = len(electrons.shape[:-2])
+    elec = electrons.reshape(*electrons.shape[:-1], -1, 3)
+    diff = old_atoms[..., None, None, :, :] - elec[..., None, :]
+    dist = jnp.linalg.norm(diff, axis=-1)
+    closest_nuc = jnp.argmin(dist, axis=-1)
+    
+    take_fn = jax.vmap(lambda x, y: jnp.take(x, y, axis=0), in_axes=(None, 0))
+    for _ in range(n_leading_dims):
+        take_fn = jax.vmap(take_fn)
+    
+    nuc_delta = new_atoms - old_atoms
+    delta_pos = take_fn(nuc_delta, closest_nuc)
+    return (elec + delta_pos).reshape(*electrons.shape)

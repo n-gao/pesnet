@@ -1,5 +1,5 @@
 system:
-  name: h4plus
+  name: H4plus
   training:
     collection_type: static
     config:

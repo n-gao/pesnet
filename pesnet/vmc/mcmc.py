@@ -9,32 +9,33 @@ import jax
 import jax.lax as lax
 import jax.numpy as jnp
 
-from pesnet.jax_utils import pmean_if_pmap
 from pesnet.nn import ParamTree
+
+from pesnet.utils.jax_utils import pmean_if_pmap
 
 
 def mh_update(
     logprob_fn,
-    electrons: jnp.ndarray,
-    key: jnp.ndarray,
-    lp_1: jnp.ndarray,
+    electrons: jax.Array,
+    key: jax.Array,
+    lp_1: jax.Array,
     num_accepts: int,
     stddev: float = 0.02,
     i: int = 0
-) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int]:
+) -> Tuple[jax.Array, jax.Array, jax.Array, int]:
     """Metropolis Hastings step
 
     Args:
         logprob_fn (Callable): log probability function
-        electrons (jnp.ndarray): (bN, 3)
-        key (jnp.ndarray): jax.random.PRNGKey
-        lp_1 (jnp.ndarray): (B)
+        electrons (jax.Array): (bN, 3)
+        key (jax.Array): jax.random.PRNGKey
+        lp_1 (jax.Array): (B)
         num_accepts (int): number of past accepts
         stddev (float, optional): proposal width. Defaults to 0.02.
         i (int, optional): step count. Defaults to 0.
 
     Returns:
-        Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, int]: 
+        Tuple[jax.Array, jax.Array, jax.Array, int]: 
             new electrons, new key, new log prob, new num_accepts
     """
     del i
@@ -71,24 +72,29 @@ def make_mcmc(
     @jax.jit
     def mcmc_step(
             params: ParamTree,
-            electrons: jnp.ndarray,
-            atoms: jnp.ndarray,
-            key: jnp.ndarray,
-            width: jnp.ndarray):
+            electrons: jax.Array,
+            atoms: jax.Array,
+            key: jax.Array,
+            width: jax.Array):
         """Perform `steps` Metropolis hastings steps.
 
         Args:
             params (ParamTree): network parameters
-            electrons (jnp.ndarray): (B, N, 3)
-            atoms (jnp.ndarray): (M, 3)
-            key (jnp.ndarray): jax.random.PRNGKey
-            width (jnp.ndarray): proposal width
+            electrons (jax.Array): (B, N, 3)
+            atoms (jax.Array): (M, 3)
+            key (jax.Array): jax.random.PRNGKey
+            width (jax.Array): proposal width
 
         Returns:
-            Tuple[jnp.ndarray, jnp.ndarray]: new electrons, move probability
+            Tuple[jax.Array, jax.Array]: new electrons, move probability
         """
-        def logprob_fn(x):
+        def logprob_fn(x): 
             return 2. * batch_network(params, x, atoms)
+        # In case that we have a different width for every atom
+        # we need to add a dimension to enable broadcasting
+        if isinstance(width, jax.Array) and width.ndim == 1:
+            width = width[:, None, None]
+
         def step_fn(x, i):
             return mh_update(logprob_fn, *x, stddev=width, i=i), None
 

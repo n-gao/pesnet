@@ -10,11 +10,11 @@ import math
 import numbers
 from typing import Counter, Optional, Sequence, Tuple
 
-import jax.numpy as jnp
 import numpy as np
-from pesnet.constants import ANGSTROM_TO_BOHR
+from pesnet.systems.constants import ANGSTROM_TO_BOHR
 from pesnet.systems import ELEMENT_BY_ATOMIC_NUM, ELEMENT_BY_SYMBOL
 from pyscf import gto
+from pesnet.systems.scf import Scf
 
 
 class Atom:
@@ -52,10 +52,10 @@ class Molecule:
         self._spins = spins
 
     def charges(self):
-        return tuple([a.atomic_number for a in self.atoms])
+        return tuple(a.atomic_number for a in self.atoms)
 
     def coords(self):
-        coords = jnp.array([a.coords for a in self.atoms])
+        coords = np.array([a.coords for a in self.atoms], dtype=np.float32)
         coords -= coords.mean(0, keepdims=True)
         return coords
 
@@ -66,10 +66,10 @@ class Molecule:
             n_electrons = sum(self.charges())
             return (math.ceil(n_electrons/2), math.floor(n_electrons/2))
 
-    def to_pyscf(self, basis='STO-6G', verbose: int = 3):
+    def to_scf(self, basis='STO-6G', restricted: bool = False, verbose: int = 3):
         mol = gto.Mole(atom=[
-            [a.symbol, coords]
-            for a, coords in zip(self.atoms, self.coords())
+            [a.symbol, coords.tolist()]
+            for a, coords in zip(self.atoms, np.array(self.coords()))
         ], basis=basis, unit='bohr', verbose=verbose)
         spins = self.spins()
         mol.spin = spins[0] - spins[1]
@@ -77,16 +77,14 @@ class Molecule:
         e_charge = sum(spins)
         mol.charge = nuc_charge - e_charge
         mol.build()
-        return mol
+        return Scf(mol, restricted)
 
     def __str__(self) -> str:
         result = ''
         if len(self.atoms) == 1:
             result = str(self.atoms[0])
         elif len(self.atoms) == 2:
-            distance = np.linalg.norm(
-                self.atoms[0].coords - self.atoms[1].coords)
-            result = f'{str(self.atoms[0])}-{str(self.atoms[1])}_{distance:.2f}'
+            result = f'{str(self.atoms[0])}-{str(self.atoms[1])}'
         else:
             vals = dict(Counter(str(a) for a in self.atoms))
             result = ''.join(f'{key}{val}' for key, val in vals.items())

@@ -2,10 +2,14 @@
 This file contains various system configurations, e.g., atomic, 
 diatomic systems, cyclobutadiene, ...
 """
+import functools
+import os
+from pathlib import Path
 import numpy as np
 
 from .element import ELEMENT_BY_ATOMIC_NUM, ELEMENT_BY_SYMBOL
 from .system import Atom, Molecule
+from .xyz_parser import read_xyz
 
 
 def atomic(symbol: str, *args, **kwargs):
@@ -18,11 +22,24 @@ def diatomic(symbol1: str, symbol2: str, R: float, units='bohr', *args, **kwargs
     return Molecule([
         Atom(symbol1, (-R/2, 0.0, 0.0), units=units),
         Atom(symbol2, (R/2, 0.0, 0.0), units=units),
+    ], *args, **kwargs)
+
+
+def triatomic(symbol1: str, symbol2: str, symbol3: str, r1: float, r2: float, theta: float):
+    rad = np.radians(theta)
+    return Molecule([
+        Atom(symbol1, (0, 0, 0)),
+        Atom(symbol2, (r1, 0, 0)),
+        Atom(symbol3, (r2*np.cos(rad), r2*np.sin(rad), 0))
     ])
 
 
 def H2(R: float, *args, **kwargs):
     return diatomic('H', 'H', R, *args, **kwargs)
+
+
+def LiH(R: float, *args, **kwargs):
+    return diatomic('Li', 'H', R, *args, **kwargs)
 
 
 def h4_plane(theta: float, R: float, *args, **kwargs):
@@ -45,6 +62,21 @@ def h_chain(n: int, R: float, *args, **kwargs):
     ])
 
 
+def h2o(angle, R):
+    return triatomic('O', 'H', 'H', R, R, angle)
+
+
+def regular_hn_plane(n: int, R: float, *args, **kwargs):
+    return Molecule([
+        Atom('H', (
+            np.sin(i/n * 2 * np.pi) * R,
+            np.cos(i/n * 2 * np.pi) * R,
+            0.0
+        ))
+        for i in range(n)
+    ])
+
+
 def by_positions(symbols, positions, units='bohr', spins=None, *args, **kwargs):
     assert len(symbols) == len(positions)
     positions = np.array(positions)
@@ -56,10 +88,50 @@ def by_positions(symbols, positions, units='bohr', spins=None, *args, **kwargs):
 
 def h4plus(positions: np.ndarray, *args, **kwargs):
     return by_positions(['H']*len(positions), positions, spins=(2, 1))
+H4plus = h4plus
 
 
-def cyclobutadiene(state: str):
+def H2HF(r1, r2, rr, th1, th2, phi):
+    mass = np.array([
+        1.00782503,
+        1.00782503,
+        1.00782503,
+        18.99840322
+    ], dtype=np.float32)
+    
+    theta1 = np.deg2rad(th1)
+    theta2 = np.deg2rad(th2)
+    phi = np.deg2rad(phi)
+    
+    positions = np.zeros((4, 3), dtype=np.float32)
+    positions[0] = np.array([-r1*np.cos(theta1)/2, -r1*np.sin(theta1)/2, 0])
+    positions[1] = np.array([ r1*np.cos(theta1)/2,  r1*np.sin(theta1)/2, 0])
+
+    bh3 = mass[3] * r2/(mass[2] + mass[3])
+    positions[2, 0] = rr +     bh3  * np.cos(theta2)
+    positions[3, 0] = rr - (r2-bh3) * np.cos(theta2)
+
+    ch3 = bh3 * np.sin(theta2)
+    dh3 = ch3 * np.sin(phi)
+    positions[2, 1] = ch3*np.cos(phi)
+    positions[3, 1] = -r2*np.cos(phi)*np.sin(theta2) + positions[2, 1]
+    if phi < 0.01:
+        positions[2, 1] = bh3 * np.sin(theta2)
+        positions[3, 1] = -(r2 - bh3) * np.sin(theta2)
+    
+    positions[2, 2] = dh3
+    positions[3, 2] = -(r2 * np.sin(theta2) * np.sin(phi) - positions[2, 2])
+
+    positions[np.abs(positions) < 1e-8] = 0
+    return Molecule([
+        Atom(sym, pos, units='bohr')
+        for sym, pos in zip('HHHF', positions)
+    ])
+
+
+def cyclobutadiene(state: str = None, alpha: float = None):
     # https://github.com/deepmind/ferminet/blob/jax/ferminet/configs/organic.py
+    assert state is not None or alpha is not None
     if state == 'ground':
         return Molecule([
             Atom('C', (0.0000000e+00, 0.0000000e+00, 0.0000000e+00)),
@@ -82,6 +154,46 @@ def cyclobutadiene(state: str):
             Atom('H', (4.1824574e+00, 4.1824574e+00, 1.7640606e-16)),
             Atom('H', (-1.4404647e+00, 4.1824574e+00, -1.7640606e-16))
         ])
+    else:
+        m1 = cyclobutadiene('ground').coords()
+        m2 = cyclobutadiene('transition').coords()
+        return Molecule([
+            Atom(c, p)
+            for c, p in zip('CCCCHHHH', m1*alpha + (1-alpha)*m2)
+        ])
+
+
+@functools.lru_cache
+def _ethanol_states(state: str, base_path: str):
+    path = os.path.join(base_path, f'Rotor_CH3_Delta_{state}.xyz')
+    configs = read_xyz(path)
+    configs = {
+        float(k): v
+        for k, v in configs.items()
+    }
+    return configs, np.array(list(configs.keys()))
+
+
+def ethanol(state: str, angle: float, base_path: str = None):
+    if base_path is None:
+        if os.path.exists('./systems/ethanol'):
+            base_path = './systems/ethanol'
+        else:
+            base_path = os.path.join(Path(__file__).parents[2], 'systems/ethanol')
+    states, keys = _ethanol_states(state, base_path)
+    key = keys[np.argmin(np.abs(angle - (keys % 360)))]
+    return states[key]
+
+
+def ethanol_angle(state: str, angle: float, base_path: str = None):
+    if base_path is None:
+        if os.path.exists('./systems/ethanol'):
+            base_path = './systems/ethanol'
+        else:
+            base_path = os.path.join(Path(__file__).parents[2], 'systems/ethanol')
+    states, keys = _ethanol_states(state, base_path)
+    key = keys[np.argmin(np.abs(angle - (keys % 360)))]
+    return key
 
 
 def bicyclobutane(state: str):
@@ -168,3 +280,8 @@ def bicyclobutane(state: str):
         ])
     else:
         raise ValueError()
+
+
+def from_xyz(file_name, state):
+    configs = read_xyz(file_name)
+    return configs[state]

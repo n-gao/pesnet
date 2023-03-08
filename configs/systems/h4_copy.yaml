@@ -11,19 +11,12 @@ system:
       R: 3.2843
 
   validation:
-    collection_type: static
-    total_samples: 1000000
+    total_samples: 100000
+    collection_type: dynamic
+    n_configs: 16
     config:
       theta:
-        - 85
-        - 86
-        - 87
-        - 88
-        - 89
-        - 90
-        - 91
-        - 92
-        - 93
-        - 94
-        - 95
+        lower: 85
+        upper: 95
+        std: 0.5
       R: 3.2843

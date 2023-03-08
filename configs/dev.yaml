@@ -1,0 +1,20 @@
+training:
+  batch_size: 1024
+  thermalizing_steps: 500
+  max_steps: 3000
+
+pretraining:
+  steps: 200
+
+log_every: 10
+
+print_progress: True
+pesnet:
+  gnn_params:
+    layers: [[64, 128], [64, 128], [64, 128], [64, 128]]
+    embedding_dim: 32
+
+evaluation:
+  total_samples: 10_000
+  init_therm_steps: 1_000
+  therm_steps: 200

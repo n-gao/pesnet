@@ -1,4 +1,5 @@
 from dataclasses import field
+import functools
 from typing import Sequence, Tuple
 
 import flax.linen as nn
@@ -6,15 +7,12 @@ import jax.numpy as jnp
 import jraph
 import numpy as np
 
-from pesnet.nn import Activation, AutoMLP, BesselRBF, named, residual
-from pesnet.spherical_basis import make_positional_encoding
+from pesnet.nn import (Activation, AutoMLP, BesselRBF, Dense, Embed,
+                       named, residual)
+from pesnet.nn.spherical_basis import make_positional_encoding
 
 
 class MessagePassing(nn.Module):
-    """
-    Simple Message passing layer with an MLP edge encoder.
-    Edge vertice embeddings are concatendated with RBF to encode
-    """
     out_dim: int
     n_layers: int
     activation: Activation
@@ -36,10 +34,6 @@ class MessagePassing(nn.Module):
 
 
 class Update(nn.Module):
-    """
-    Simple GNN update function.
-    The aggregated message is concatendated with the nuclei embedding and passed through an MLP.
-    """
     out_dim: int
     n_layers: int
     activation: Activation
@@ -51,9 +45,6 @@ class Update(nn.Module):
 
 
 class NodeOut(nn.Module):
-    """
-    Node output layer with charge specific biases.
-    """
     max_charge: int
     out_dim: int
     depth: int
@@ -61,8 +52,11 @@ class NodeOut(nn.Module):
 
     @nn.compact
     def __call__(self, x, charges):
-        out_bias = nn.Embed(self.max_charge, self.out_dim)(charges)
+        out_bias = Embed(self.max_charge, self.out_dim)(charges)
         return AutoMLP(self.out_dim, self.depth, self.activation, final_bias=False)(x) + out_bias
+
+
+GlobalOut = functools.partial(named, 'GlobalOut', AutoMLP)
 
 
 class GNN(nn.Module):
@@ -78,12 +72,13 @@ class GNN(nn.Module):
     rbf_dim: int = 32
     rbf_cutoff: float = 10.0
     aggregate_before_out: bool = True
+    directional_edge: bool = False
     pos_encoding_config: dict = field(default_factory=lambda *_: {
         'cutoff': 5.,
         'n_sph': 7,
         'n_rad': 6
     })
-    activation: Activation = nn.tanh
+    activation: Activation = nn.silu
 
     @nn.compact
     def __call__(self, nuclei):
@@ -95,30 +90,31 @@ class GNN(nn.Module):
         )
         nuclei = nuclei.reshape(-1, 3) @ axes.value
         n_nuclei = nuclei.shape[0]
-        max_charge = max(self.charges)
+        max_charge = max(self.charges)+1
         charges = jnp.array(self.charges)
 
-
         # Construct fully connected graph
-        senders = np.arange(n_nuclei).repeat(n_nuclei-1)
-        receivers = np.arange(n_nuclei)[None].repeat(n_nuclei-1, axis=0)
-        receivers = (receivers + np.arange(n_nuclei-1)[:, None]+1) % n_nuclei
-        receivers = receivers.reshape(-1)
-
+        senders, receivers = np.where(np.ones((n_nuclei, n_nuclei)) - np.eye(n_nuclei))
         senders, receivers = jnp.array(senders), jnp.array(receivers)
 
         # Edge embedding
-        e_embed = self.rbf(self.rbf_dim, self.rbf_cutoff)(
-            jnp.linalg.norm(nuclei[senders] - nuclei[receivers], axis=-1))
+        edges = nuclei[senders] - nuclei[receivers]
+        if self.directional_edge:
+            e_embed = Dense(self.embedding_dim)(jnp.concatenate([
+                self.rbf(self.rbf_dim, self.rbf_cutoff)(jnp.linalg.norm(edges, axis=-1)),
+                make_positional_encoding(7, 6, 10)(edges)
+            ], axis=-1))
+        else:
+            e_embed = self.rbf(self.rbf_dim, self.rbf_cutoff)(jnp.linalg.norm(edges, axis=-1))
 
         # Node embedding
-        n_embed = nn.Embed(
+        n_embed = Embed(
             max_charge,
             self.embedding_dim
         )(charges)
         if self.pos_encoding_config is not None:
-            pos_embed = make_positional_encoding(
-                **self.pos_encoding_config)(nuclei - nuclei.mean(-2, keepdims=True))
+            pos_encode = make_positional_encoding(**self.pos_encoding_config)
+            pos_embed = pos_encode(nuclei - nuclei.mean(-2, keepdims=True))
             n_embed = jnp.concatenate([n_embed, pos_embed], axis=-1)
 
         # Message passing and update
@@ -143,7 +139,7 @@ class GNN(nn.Module):
         if len(self.global_out_dims) > 0:
             global_inp = jnp.mean(n_embed, axis=0)
         global_output = [
-            named('GlobalOut', AutoMLP, out, self.out_mlp_depth,
+            GlobalOut(out, self.out_mlp_depth,
                   activation=self.activation)(global_inp)
             for out in self.global_out_dims
         ]
@@ -151,9 +147,6 @@ class GNN(nn.Module):
 
 
 class GNNPlaceholder(nn.Module):
-    """
-    Placeholder network that returns empty lists.
-    """
     @nn.compact
     def __call__(self, nuclei):
         return [], []

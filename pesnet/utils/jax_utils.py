@@ -6,16 +6,18 @@ https://github.com/deepmind/ferminet/tree/jax/ferminet
 import functools
 
 import jax
+import jax.tree_util as jtu
 from jax import core
 
 broadcast = jax.pmap(lambda x: x)
+instance = functools.partial(jtu.tree_map, lambda x: x[0])
 
 p_split = jax.pmap(lambda key: tuple(jax.random.split(key)))
 
 
 def replicate(pytree):
     n = jax.local_device_count()
-    stacked_pytree = jax.tree_map(lambda x: jax.lax.broadcast(x, (n,)), pytree)
+    stacked_pytree = jtu.tree_map(lambda x: jax.lax.broadcast(x, (n,)), pytree)
     return broadcast(stacked_pytree)
 
 

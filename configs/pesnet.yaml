@@ -11,17 +11,46 @@ pesnet:
             n_rad: 6
         activation: tanh
         aggregate_before_out: True
+    
+    dimenet_params:
+        emb_size: 128
+        out_emb_size: 256
+        int_emb_size:  64
+        basis_emb_size: 8
+        num_blocks: 4
+
+        directional: True
+        concat_before_out: True
+
+        num_spherical: 7
+        num_radial: 6
+        num_rbf: 32
+        cutoff: 10
+        envelope_exponent: 1
+        envelope_type: none
+
+        num_before_skip: 1
+        num_after_skip: 2
+        num_dense_output: 3
+
+        activation: silu
 
     ferminet_params:
         determinants: 16
+        full_det: True
         hidden_dims: [[256, 32], [256, 32], [256, 32], [256, 32]]
+        absolute_spins: False
+        update_pair_independent: False
         input_config:
             nuclei_embedding: 64
             out_dim: 64
             mlp_depth: 2
             activation: tanh
-            mlp_activation: tanh
-        activation: tanh
+            mlp_activation: silu
+        activation: silu
+        jastrow_config:
+            n_layers: 3
+            activation: silu
 
     global_filter: >
         {
@@ -64,14 +93,48 @@ pesnet:
                 },
                 '$$': [
                     {
-                        'jastrow': {
+                        'jastrow_up': {
+                            f'Dense_{i}': {'bias': None}
+                            for i in range(3)
+                        },
+                        'jastrow_down': {
                             f'Dense_{i}': {'bias': None}
                             for i in range(3)
                         }
                     }
                 ],
-                'jastrow': {'Dense_2': {'kernel': None}}
+                '$$$': [
+                    {
+                        'jastrow_up': {'Dense_2': {'kernel': None}},
+                        'jastrow_down': {'Dense_2': {'kernel': None}}
+                    }
+                ]
             }
         }
     include_default_filter: True
-    meta_network: gnn
+    meta_model: gnn
+
+init_method: default
+
+surrogate:
+    emb_size: 128
+    out_emb_size: 256
+    int_emb_size:  64
+    basis_emb_size: 8
+    num_blocks: 4
+    
+    directional: False
+    concat_before_out: False
+
+    num_spherical: 7
+    num_radial: 6
+    num_rbf: 6
+    cutoff: 10
+    envelope_exponent: 1
+    envelope_type: none
+
+    num_before_skip: 1
+    num_after_skip: 2
+    num_dense_output: 3
+
+    activation: silu

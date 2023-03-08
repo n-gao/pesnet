@@ -1,0 +1,59 @@
+system:
+  name: H2HF
+  training:
+    n_configs: 64
+    config:
+      r1:
+        lower: 1.2
+        upper: 1.8
+        std: 0.1
+      r2:
+        lower: 1.2
+        upper: 1.8
+        std: 0.1
+      rr:
+        lower: 3.0
+        upper: 8.0
+        std: 0.5
+      th1:
+        lower: 0
+        upper: 180
+        std: 10
+      th2:
+        lower: 0
+        upper: 180
+        std: 10
+      phi:
+        lower: 0
+        upper: 180
+        std: 10
+
+
+  validation:
+    total_samples: 1000000
+    n_configs: 64
+    config:
+      r1:
+        lower: 1.2
+        upper: 1.8
+        std: 0.1
+      r2:
+        lower: 1.2
+        upper: 1.8
+        std: 0.1
+      rr:
+        lower: 3.0
+        upper: 8.0
+        std: 0.5
+      th1:
+        lower: 0
+        upper: 180
+        std: 10
+      th2:
+        lower: 0
+        upper: 180
+        std: 10
+      phi:
+        lower: 0
+        upper: 180
+        std: 10

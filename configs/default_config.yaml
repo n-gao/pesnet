@@ -8,12 +8,10 @@ optimization:
   clipping_method: ferminet
   gradient: natural
   max_norm: 1.0
-  accumulate_n: 1
   lr:
     init: 1.e-1
     decay: 1.0
     delay: 1000.0
-    gnn_prefactor: 1.0
   cg:
     damping:
       method: std_based
@@ -23,30 +21,49 @@ optimization:
         decay: 1.0
         min: 1.e-5
         schedule: hyperbola
-      adaptive:
-        step_size: 0.5
-        test_every: 50
-        threshold: 1.e-4
       std_based:
         base: 1.e-4
+        decay: 0.999
     maxiter: 100
-    precondition: False
+
+
+surrogate_optimization:
+  lr:
+    init: 1.e-4
+    delay: 5000.0
+    decay: 1.0
+  n_steps: 5
+  loss_decay: 0.999
+  ema_decay_min: 0.99
+  ema_decay_max: 0.9999
+  threshold: 1.05
+  loss: rmse
 
 training:
   batch_size: 4096
-  val_batch_size: 4096
+  val_batch_size: 8192
   thermalizing_steps: 500
-  checkpoint_every: 1000
+  checkpoint_every: 5000
   max_steps: 60000
-  patience: 20000
+  patience: 10000
   ema: 0.99
   eps: 0.001
 
 pretraining:
   steps: 2000
   single: False
-  restricted: False
   start_from_last: False
-  train_gnn: False
+  gnn_lr: 0
+  method: ['rhf']
+  align_mo: False
+  distinct_orbitals: True
 
 log_every: 10
+transform_coordinates: True
+log_energies: False
+
+
+evaluation:
+  total_samples: 1_000_000
+  init_therm_steps: 10_000
+  therm_steps: 2_000

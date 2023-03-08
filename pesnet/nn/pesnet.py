@@ -7,16 +7,17 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from jax.flatten_util import ravel_pytree
-
-from pesnet.ferminet import FermiNet
-from pesnet.gnn import GNN, GNNPlaceholder
 from pesnet.nn import MLP, ParamTree
-from pesnet.utils import get_pca_axes
+from pesnet.nn.dimenet import DimeNet
+from pesnet.nn.ferminet import FermiNet
+from pesnet.nn.gnn import GNN, GNNPlaceholder
+from pesnet.nn.coords import find_axes
+from pesnet.utils import merge_dictionaries
 
 TreeFilter = Dict[Any, Union[None, Any, 'TreeFilter']]
 
 
-def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jnp.ndarray, Callable[[jnp.ndarray], ParamTree]]:
+def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jax.Array, Callable[[jax.Array], ParamTree]]:
     """This function takes a ParamTree and flattens it into a two day array
     with chunk_size as the first dimension. If chunk_size is < 0 the first dimension of
     the first array is taken.
@@ -26,7 +27,7 @@ def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jnp.ndarr
         chunk_size (int, optional): Chunk size. Defaults to -1.
 
     Returns:
-        Tuple[jnp.ndarray, Callable[[jnp.ndarray], ParamTree]]: chunked array, unravel function
+        Tuple[jax.Array, Callable[[jax.Array], ParamTree]]: chunked array, unravel function
     """
     # This function takes a ParamTree and flattens it into a two day array
     # with chunk_size as the first dimension. If chunk_size is < 0 the first dimension of
@@ -38,7 +39,7 @@ def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jnp.ndarr
     sizes = [x.shape[1] for x in xs]
     indices = np.cumsum(sizes)
 
-    def unravel(data: jnp.ndarray) -> ParamTree:
+    def unravel(data: jax.Array) -> ParamTree:
         if data is None or data.size == 0:
             return {}
         if data.ndim == 0:
@@ -134,8 +135,8 @@ def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = No
     def _reconstruct(
             tree: ParamTree,
             filters: TreeFilter,
-            replacements: Iterable[jnp.ndarray],
-            unravel_fn: Iterable[Callable[[jnp.ndarray], jnp.ndarray]]) -> ParamTree:
+            replacements: Iterable[jax.Array],
+            unravel_fn: Iterable[Callable[[jax.Array], jax.Array]]) -> ParamTree:
         # This function uses that the tree traversal of the filters
         # does not change.
         # So, we can use iterators for the replacements and unravel functions and do not have
@@ -168,7 +169,7 @@ def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = No
                     tree[k][f] = unravel(next(replacements))
         return tree
 
-    def reconstruct(tree: ParamTree, replacements: jnp.ndarray, copy: bool = False) -> ParamTree:
+    def reconstruct(tree: ParamTree, replacements: jax.Array, copy: bool = False) -> ParamTree:
         if copy:
             tree = deepcopy(tree)
         if replacements is None:
@@ -179,71 +180,52 @@ def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = No
 
 
 def update_parameter_initialization(
-        weight: jnp.ndarray,
-        bias: jnp.ndarray,
-        flat_original: jnp.ndarray,
-        original: List[jnp.ndarray],
-        weight_bias_ratio: Tuple[float, float] = (1, 1)) -> Tuple[jnp.ndarray, jnp.ndarray]:
+        weight: jax.Array,
+        bias: jax.Array,
+        flat_original: jax.Array,
+        original: List[jax.Array],
+        charges: Tuple[int, ...],
+        weight_bias_ratio: Tuple[float, float] = (1, 1)) -> Tuple[jax.Array, jax.Array]:
     """Rescales the weights and biases such that the distribution of the output matches 
     the distribution of the original parameters. If the original parameters are initialized
     to fixed numbers (e.g., 0 or 1) we try to match them up to some small noise.
 
     Args:
-        weight (jnp.ndarray): Weight matrix
-        bias (jnp.ndarray): Bias vector
-        flat_original (jnp.ndarray): Original parameters as single array
-        original (List[jnp.ndarray]): Original parameters as list
+        weight (jax.Array): Weight matrix
+        bias (jax.Array): Bias vector
+        flat_original (jax.Array): Original parameters as single array
+        original (List[jax.Array]): Original parameters as list
         weight_bias_ratio (Tuple[float, float], optional): Ratio between weights and biases. Defaults to (1, 1).
 
     Returns:
-        Tuple[jnp.ndarray, jnp.ndarray]: new weights, new bias
+        Tuple[jax.Array, jax.Array]: new weights, new bias
     """
     n_nodes = flat_original.shape[0] if flat_original.ndim > 1 else 1
     chunks = [o.size//n_nodes for o in original]
     chunks = [0] + [c for c in chunks if c > 0]
     chunks = np.cumsum(chunks)
     for i in range(len(chunks)-1):
-        chunk = flat_original[..., chunks[i]:chunks[i+1]]
-        index = jax.ops.index[..., chunks[i]:chunks[i+1]]
-        if (jnp.mod(chunk, 1) == 0).all():
+        idx = slice(chunks[i], chunks[i+1])
+        chunk = flat_original[..., idx]
+        if len(np.unique(chunk, return_counts=True)[1]) < (chunk.size/2):
             # We repalce the biases with the correct terms and set the weights to a
             # very small initialization such that their influence to the result is minor
-            bias = jax.ops.index_update(
-                bias, index, chunk[0] if chunk.ndim > 1 else chunk)
-            weight = jax.ops.index_mul(weight, index, 1e-1)
+            if chunk.ndim == 2:
+                # We assume that this applies to the envelope parameters
+                for j, b in zip(charges, chunk):
+                    bias = bias.at[..., j, idx].set(b)
+            else:
+                bias = bias.at[..., idx].set(chunk)
+            weight = weight.at[..., idx].multiply(1e-1)
         else:
             total_weight = sum(weight_bias_ratio)
-            weight_weight = jnp.sqrt(total_weight/weight_bias_ratio[0])
+            kernel_weight = jnp.sqrt(total_weight/weight_bias_ratio[0])
             bias_weight = jnp.sqrt(total_weight/weight_bias_ratio[1])
             base_std = bias.std()
             c_std = chunk.std()
-            weight = jax.ops.index_mul(weight, index, c_std/weight_weight)
-            bias = jax.ops.index_mul(bias, index, c_std/bias_weight)
+            weight = weight.at[..., idx].multiply(c_std/kernel_weight)
+            bias = bias.at[..., idx].multiply(c_std/bias_weight)
     return weight, bias
-
-
-def merge_filters(filter1: dict, filter2: dict) -> dict:
-    """Merge to filter dictionaries. If two values coolide,
-    filter 2 overrides filter 1.
-
-    Args:
-        filter1 (dict): Filter 1
-        filter2 (dict): Filter 2
-
-    Returns:
-        dict: Merged filter of 1 and 2
-    """
-    result = deepcopy(filter1)
-    for key, val in filter2.items():
-        if key not in result:
-            result[key] = val
-        elif isinstance(val, dict) and isinstance(result[key], dict):
-            result[key] = merge_filters(result[key], val)
-        elif isinstance(val, list) and isinstance(result[key], list):
-            result[key] = merge_filters(result[key], val)
-        else:
-            result[key] = val
-    return result
 
 
 def get_default_filters(
@@ -263,84 +245,19 @@ def get_default_filters(
     node_filter = {
         'params': {
             'to_orbitals': {
-                '$': [
-                    {
-                        f'IsotropicEnvelope_{i}': {'pi': None}
-                        for i in range(2)
-                    },
-                ],
-                '$$': [
-                    {
-                        f'IsotropicEnvelope_{i}': {'sigma': None}
-                        for i in range(2)
-                    },
-                ],
+                f'IsotropicEnvelope_{i}': {
+                    'sigma': None,
+                    'pi': None
+                }
+                for i in range(2)
             },
             'input_construction': {
-                'nuc_embedding': None
+                'nuc_embedding': None,
+                'nuc_temp': None
             }
         }
     }
     return node_filter
-
-
-def find_axes(atoms: jnp.ndarray, charges: jnp.ndarray) -> jnp.ndarray:
-    """Generates equivariant axes based on PCA.
-
-    Args:
-        atoms (jnp.ndarray): (..., M, 3)
-        charges (jnp.ndarray): (M)
-
-    Returns:
-        jnp.ndarray: (3, 3)
-    """
-    atoms = jax.lax.stop_gradient(atoms)
-    # First compute the axes by PCA
-    atoms = atoms - atoms.mean(-2, keepdims=True)
-    s, axes = get_pca_axes(atoms, charges)
-    # Let's check whether we have identical eigenvalues
-    # if that's the case we need to work with soem pseudo positions
-    # to get unique atoms.
-    is_ambiguous = jnp.count_nonzero(
-        jnp.unique(s, size=3, fill_value=0)) < jnp.count_nonzero(s)
-    # We always compute the pseudo coordinates because it causes some compile errors
-    # for some unknown reason on A100 cards with jax.lax.cond.
-    # Compute pseudo coordiantes based on the vector inducing the largest coulomb energy.
-    distances = atoms[None] - atoms[..., None, :]
-    dist_norm = jnp.linalg.norm(distances, axis=-1)
-    coulomb = charges[None] * charges[:, None] / dist_norm
-    off_diag_mask = ~np.eye(atoms.shape[0], dtype=np.bool)
-    coulomb, distances = coulomb[off_diag_mask], distances[off_diag_mask]
-    idx = jnp.argmax(coulomb)
-    scale_vec = distances[idx]
-    scale_vec /= jnp.linalg.norm(scale_vec)
-    # Projected atom positions
-    proj = atoms@scale_vec[..., None] * scale_vec
-    diff = atoms - proj
-    pseudo_atoms = proj * (1+1e-4) + diff
-
-    pseudo_s, pseudo_axes = get_pca_axes(pseudo_atoms, charges)
-
-    # Select pseudo axes if it is ambiguous
-    s = jnp.where(is_ambiguous, pseudo_s, s)
-    axes = jnp.where(is_ambiguous, pseudo_axes, axes)
-
-    order = jnp.argsort(s)[::-1]
-    axes = axes[:, order]
-
-    # Compute an equivariant vector
-    distances = jnp.linalg.norm(atoms[None] - atoms[..., None, :], axis=-1)
-    weights = distances.sum(-1)
-    equi_vec = ((weights * charges)[..., None] * atoms).mean(0)
-
-    ve = equi_vec@axes
-    flips = ve < 0
-    axes = jnp.where(flips[None], -axes, axes)
-
-    right_hand = jnp.stack(
-        [axes[:, 0], axes[:, 1], jnp.cross(axes[:, 0], axes[:, 1])], axis=1)
-    axes = jnp.where(jnp.abs(ve[-1]) < 1e-7, right_hand, axes)
-    return axes
 
 
 PESNetFunctions = namedtuple(
@@ -352,7 +269,7 @@ PESNetFunctions = namedtuple(
         'pesnet_orbitals',
         'extract_node_params',
         'extract_global_params',
-        'update_axes',
+        'update_axes'
     ])
 
 
@@ -361,16 +278,18 @@ def make_pesnet(
     charges: Tuple[int, ...],
     spins: Tuple[int, int],
     gnn_params,
+    dimenet_params,
     ferminet_params,
     node_filter: dict = {},
     global_filter: dict = {},
     include_default_filter: bool = True,
+    meta_model: str = 'gnn',
     **kwargs
 ) -> Tuple[ParamTree, PESNetFunctions]:
     """Generate PESNet with parameters and all relevant functions.
 
     Args:
-        key (jnp.ndarray): jax.random.PRNGKey
+        key (jax.Array): jax.random.PRNGKey
         charges (Tuple[int, ...]): (M)
         spins (Tuple[int, int]): (spin_up, spin_down)
         gnn_params (dict): GNN initialization parameters 
@@ -382,6 +301,8 @@ def make_pesnet(
     Returns:
         Tuple[ParamTree, PESNetFucntions]: parameters, PESNet functions
     """
+    meta_model = meta_model.lower()
+    assert meta_model in ['gnn', 'dimenet']
     # In case one sets a string we evaluate that string
     if isinstance(node_filter, str):
         node_filter = eval(node_filter)
@@ -394,7 +315,7 @@ def make_pesnet(
 
     n_atoms = len(charges)
     ferminet = FermiNet(
-        len(charges),
+        charges,
         spins,
         **ferminet_params
     )
@@ -414,7 +335,7 @@ def make_pesnet(
     # Construct default filters
     if include_default_filter:
         default_node_filter = get_default_filters(fermi_params)
-        node_filter = merge_filters(default_node_filter, node_filter)
+        node_filter = merge_dictionaries(default_node_filter, node_filter)
 
     # Extract node features
     fermi_params, node_param_list, node_recover_fn = extract_from_tree(
@@ -428,15 +349,20 @@ def make_pesnet(
 
     use_meta = sum(n_params) + sum(g_params) > 0
     if use_meta:
-        gnn_params = {
-            **gnn_params,
-            'node_out_dims': n_params,
-            'global_out_dims': g_params,
-        }
-        gnn = GNN(
-            charges=charges,
-            **gnn_params
-        )
+        if meta_model == 'gnn':
+            gnn = GNN(
+                charges=charges,
+                node_out_dims=n_params,
+                global_out_dims=g_params,
+                **gnn_params
+            )
+        elif meta_model == 'dimenet':
+            gnn = DimeNet(
+                node_out_dims=n_params,
+                global_out_dims=g_params,
+                charges=charges,
+                **dimenet_params,
+            )
     else:
         gnn = GNNPlaceholder()
     key, subkey = jax.random.split(key)
@@ -455,6 +381,7 @@ def make_pesnet(
                 embed['embedding'],
                 node_param_list[i],
                 [node_param_list[i]],
+                charges,
                 (1, 2)
             )
 
@@ -466,20 +393,24 @@ def make_pesnet(
                 last_layer['bias'],
                 global_param_list[i],
                 [global_param_list[i]],
+                charges,
                 (1, 2)
             )
 
     # Construct complete parameters
     params = {
         'gnn': gnn_params,
-        'ferminet': fermi_params,
+        'ferminet': fermi_params
     }
+    if 'constants' in params['gnn']:
+        params['gnn']['constants']['axes'] = None
+    params['ferminet']['constants']['axes'] = None
 
+    find_axes_fn = functools.partial(find_axes, charges=jnp.array(charges))
     def update_axes(params, atoms):
-        if not use_meta:
-            return params
-        axes = find_axes(atoms, jnp.array(charges))
-        params['gnn']['constants']['axes'] = axes
+        axes = find_axes_fn(atoms)
+        if 'constants' in params['gnn']:
+            params['gnn']['constants']['axes'] = axes
         params['ferminet']['constants']['axes'] = axes
         return params
 
@@ -523,6 +454,6 @@ def make_pesnet(
         pesnet_orbitals=pesnet_orbitals,
         extract_node_params=extract_node_params,
         extract_global_params=extract_global_params,
-        update_axes=update_axes,
+        update_axes=update_axes
     )
     return params, result
