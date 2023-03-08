@@ -64,41 +64,6 @@ class ExponentiallyMovingAverage:
         return self._value / self._total_weight
 
 
-class EMAPyTree:
-    """Exponentially moving averages for JAX Pytrees.
-    """
-
-    def __init__(self, tree=None) -> None:
-        if tree is not None:
-            self._value = jtu.tree_map(lambda x: x, tree)
-            self._total_weight = 1.
-        else:
-            self._value = None
-            self._total_weight = 0.
-
-        def update_fn(v1, v2, d):
-            return jtu.tree_map(lambda x, y: x*d + y, v1, v2)
-        self.update_fn = jax.jit(update_fn)
-
-        def value_fn(t, w):
-            return jtu.tree_map(lambda x: x/w, t)
-        self.value_fn = jax.jit(value_fn)
-
-    def update(self, value, decay):
-        if self._value == None:
-            self._value = jtu.tree_map(lambda x: x, value)
-        else:
-            self._value = self.update_fn(self._value, value, decay)
-        self._total_weight = self._total_weight * decay + 1
-
-    @property
-    def value(self):
-        if self._value is None:
-            return {}
-        else:
-            return self.value_fn(self._value, self._total_weight)
-
-
 # EMA for usage in JAX
 def ema_make(tree):
     return (jtu.tree_map(lambda x: jnp.zeros_like(x), tree), jnp.zeros(()))
