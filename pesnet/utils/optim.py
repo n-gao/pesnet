@@ -1,4 +1,6 @@
 import functools
+import logging
+from typing import Callable
 
 import jax
 import jax._src.scipy.sparse.linalg as jssl
@@ -6,6 +8,108 @@ import jax.lax as lax
 import jax.numpy as jnp
 import jax.tree_util as jtu
 import numpy as np
+import optax
+
+from pesnet.utils import make_schedule
+from pesnet.utils.damping import make_damping_fn
+from pesnet.utils.jax_utils import pmean_if_pmap
+from pesnet.utils.jnp_utils import tree_add, tree_mul
+from pesnet.utils.typing import NaturalGradient, NaturalGradientState
+
+
+def make_optimizer(lr: dict, transformations: list[tuple[str, tuple, dict]]) -> optax.GradientTransformation:
+    return optax.chain(*[
+        getattr(optax, name)(*args, **kwargs)
+        for name, args, kwargs in transformations
+    ],
+        optax.scale_by_schedule(make_schedule(lr)),
+        optax.scale(-1.)
+    )
+
+
+def scale_by_trust_ratio_embeddings(
+    min_norm: float = 0.0,
+    trust_coefficient: float = 1.,
+    eps: float = 0.,
+) -> optax.GradientTransformation:
+    """Scale by trust ratio but for embeddings were we don't want the norm
+    over all parameters but just the last dimension.
+    """
+
+    def init_fn(params):
+        del params
+        return optax.ScaleByTrustRatioState()
+
+    def update_fn(updates, state, params):
+        if params is None:
+            raise ValueError(optax.NO_PARAMS_MSG)
+
+        def _scale_update(update, param):
+            # Clip norms to minimum value, by default no clipping.
+            param_norm = optax.safe_norm(param, min_norm, axis=-1, keepdims=True)
+            update_norm = optax.safe_norm(update, min_norm, axis=-1, keepdims=True)
+            trust_ratio = trust_coefficient * param_norm / (update_norm + eps)
+
+            # If no minimum norm clipping is used
+            # Set trust_ratio to 1 in case where parameters would never be updated.
+            zero_norm = jnp.logical_or(param_norm == 0., update_norm == 0.)
+            safe_trust_ratio = jnp.where(
+                zero_norm, jnp.array(1.0, dtype=param.dtype), trust_ratio)
+
+            return update * safe_trust_ratio
+
+        updates = jax.tree_util.tree_map(_scale_update, updates, params)
+        return updates, state
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+
+def make_natural_gradient_preconditioner(
+    network: Callable[..., jax.Array],
+    damping: dict,
+    linearize: bool = True,
+    precision: str = 'float32',
+    **kwargs) -> NaturalGradient:
+    logging.info(f'CG precision: {precision}')
+    damping_update, damping_state = make_damping_fn(**damping)
+
+    def init(params):
+        return NaturalGradientState(
+            jtu.tree_map(jnp.zeros_like, params),
+            damping_state
+        )
+
+    @jax.jit
+    def nat_cg(params, norm, inp, damp_inp, grad, natgrad_state: NaturalGradientState):
+        with jax.default_matmul_precision(precision):
+            def log_p_closure(p):
+                return network(p, *inp)
+            
+            _, vjp_fn = jax.vjp(log_p_closure, params)
+            if linearize:
+                _, jvp_fn = jax.linearize(log_p_closure, params)
+            else:
+                jvp_fn = lambda x: jax.jvp(log_p_closure, params, x)[1]
+
+            damping, damping_state = damping_update(state=natgrad_state.damping_state, **damp_inp)
+
+            def Fisher_matmul(v):
+                w = jvp_fn(v) * norm
+                uncentered = vjp_fn(w)[0]
+                result = tree_add(uncentered, tree_mul(v, damping))
+                result = pmean_if_pmap(result)
+                return result
+            
+            # Compute natural gradient
+            natgrad = cg(
+                A=Fisher_matmul,
+                b=grad,
+                x0=natgrad_state.last_grad,
+                fixed_iter=jax.device_count() > 1, # if we have multiple GPUs we must do a fixed number of iterations
+                **kwargs,
+            )[0]
+        return natgrad, NaturalGradientState(natgrad, damping_state), damping
+    return NaturalGradient(nat_cg, init)
 
 
 def cg_solve(A, b, x0=None, *, maxiter, M=jssl._identity, min_lookback=10, lookback_frac=0.1, eps=5e-6):
@@ -83,8 +187,8 @@ def cg(A, b, x0=None, *, maxiter=None, min_lookback=10, lookback_frac=0.1, eps=5
 
     Args:
         A (Callable): Matrix A in Ax=b
-        b (jax.Array): b
-        x0 (jax.Array, optional): Initial value for x. Defaults to None.
+        b (jnp.ndarray): b
+        x0 (jnp.ndarray, optional): Initial value for x. Defaults to None.
         maxiter (int, optional): Maximum number of iterations. Defaults to None.
         min_lookback (int, optional): Minimum lookback distance. Defaults to 10.
         lookback_frac (float, optional): Fraction of iterations to look back. Defaults to 0.1.
@@ -92,7 +196,7 @@ def cg(A, b, x0=None, *, maxiter=None, min_lookback=10, lookback_frac=0.1, eps=5
         M (Callable, optional): Preconditioner. Defaults to None.
 
     Returns:
-        jax.Array: b
+        jnp.ndarray: b
     """
     if x0 is None:
         x0 = jtu.tree_map(jnp.zeros_like, b)

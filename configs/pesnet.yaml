@@ -5,11 +5,7 @@ pesnet:
         out_mlp_depth: 2
         msg_mlp_depth: 2
         update_mlp_depth: 2
-        pos_encoding_config:
-            cutoff: 5.
-            n_sph: 7
-            n_rad: 6
-        activation: tanh
+        activation: silu
         aggregate_before_out: True
     
     dimenet_params:

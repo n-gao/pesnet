@@ -1,17 +1,17 @@
 import math
 
 import jax
-import jax.numpy as jnp
 import numpy as np
+from chex import PRNGKey
 from seml_logger import Logger
 
-from pesnet.utils.jax_utils import broadcast, replicate
 from pesnet.systems.collection import ConfigCollection
-from pesnet.vmc.training import coordinate_transform, init_electrons
+from pesnet.utils.jax_utils import broadcast, replicate
+from pesnet.vmc.update import init_electrons
 
 
 def eval_energy_parallel(
-    key: jax.Array,
+    key: PRNGKey,
     vmc,
     configs: ConfigCollection,
     total_samples: int,
@@ -39,12 +39,13 @@ def eval_energy_parallel(
     sys = configs.get_current_systems()[0]
     key, subkey = jax.random.split(key)
     electrons = init_electrons(
-        val_atoms,
-        sys.charges(),
-        sys.spins(),
-        batch_size,
-        subkey
+        subkey,
+        val_atoms[0],
+        sys.charges,
+        sys.spins,
+        batch_size
     )
+    electrons = broadcast(electrons.reshape(jax.device_count(), -1, *electrons.shape[1:]))
     electrons = vmc.thermalize_samples(
         electrons,
         val_atoms,
@@ -70,7 +71,7 @@ def eval_energy_parallel(
 
 
 def eval_energy_sequential(
-    key: jax.Array,
+    key: PRNGKey,
     vmc,
     configs: ConfigCollection,
     batch_size: int,
@@ -104,18 +105,18 @@ def eval_energy_sequential(
     val_systems = configs.get_current_systems()
     
     for i, sys in logger.tqdm(enumerate(val_systems), total=len(val_systems), desc='Evaluation'):
-        val_atoms = replicate(sys.coords()[None])
+        val_atoms = replicate(sys.coords[None])
 
         if i == 0:
             key, subkey = jax.random.split(key)
             electrons = init_electrons(
-                val_atoms,
-                sys.charges(),
-                sys.spins(),
-                batch_size,
-                subkey
+                subkey,
+                val_atoms[0],
+                sys.charges,
+                sys.spins,
+                batch_size
             )
-            electrons = broadcast(electrons)
+            electrons = broadcast(electrons.reshape(jax.device_count(), -1, *electrons.shape[1:]))
             electrons = vmc.thermalize_samples(
                 electrons,
                 val_atoms,
@@ -124,7 +125,7 @@ def eval_energy_sequential(
                 adapt_step_width=True
             )
         else:
-            electrons = coordinate_transform(old_atoms, val_atoms, electrons)
+            electrons = vmc.coordinate_transform(old_atoms, val_atoms, electrons)
             electrons = vmc.thermalize_samples(
                 electrons,
                 val_atoms,
@@ -162,7 +163,7 @@ def eval_energy_sequential(
 
 
 def eval_energy(
-    key: jax.Array,
+    key: PRNGKey,
     vmc,
     configs: ConfigCollection,
     total_samples: int,

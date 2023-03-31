@@ -9,7 +9,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from pesnet.nn import (Activation, ActivationWithGain, AutoMLP, Dense,
-                       Dense_no_bias, constant_init, residual)
+                       Dense_no_bias, residual)
 
 
 class InvariantEncoding(nn.Module):
@@ -24,13 +24,13 @@ class InvariantEncoding(nn.Module):
         n_elec = electrons.shape[0]
         n_atoms = atoms.shape[0]
         activation = ActivationWithGain(self.activation)
-        mlp_activation = self.activation if self.mlp_activation is None else self.mlp_activation
 
         # Electron-atom distances
         r_im = electrons[:, None] - atoms[None]
         r_im_norm = jnp.linalg.norm(r_im, keepdims=True, axis=-1)
         r_im = jnp.concatenate([r_im, r_im_norm], axis=-1)
-        h_one = r_im
+        scaling = jnp.log(1+r_im_norm)/r_im_norm
+        h_one = r_im * scaling
 
         # Electron-electron distances
         r_ij = electrons[:, None] - electrons[None]
@@ -38,26 +38,25 @@ class InvariantEncoding(nn.Module):
             r_ij + jnp.eye(n_elec)[..., None],
             keepdims=True,
             axis=-1
-        ) * (1.0 - jnp.eye(n_elec)[..., None])
-        r_ij = jnp.concatenate([r_ij, r_ij_norm], axis=-1)
-        h_two = r_ij
+        )
+        scaling = jnp.log(1+r_ij_norm)/r_ij_norm
+        r_ij = jnp.concatenate([r_ij, r_ij_norm * (1.0 - jnp.eye(n_elec)[..., None])], axis=-1)
+        h_two = r_ij * scaling
 
         # Invariant electron-nuclei embedding
         nuc_embedding = self.param(
             'nuc_embedding',
+            jnn.initializers.normal(1/np.sqrt(4)),
+            (n_atoms, 4, self.nuclei_embedding)
+        )
+        nuc_bias = self.param(
+            'nuc_bias',
             jnn.initializers.normal(1.0),
             (n_atoms, self.nuclei_embedding)
         )
-        h_one = Dense(self.nuclei_embedding)(h_one)
-        h_one = (h_one + nuc_embedding[None])
+        h_one = jnp.einsum('nmi,mio->nmo', h_one, nuc_embedding) + nuc_bias
         h_one = activation(h_one)
-
-        h_one = residual(h_one, AutoMLP(
-            self.out_dim,
-            self.mlp_depth,
-            scale='linear',
-            activation=mlp_activation
-        )(h_one)).mean(1)
+        h_one = h_one.mean(1)
         return h_one, h_two, r_im, r_ij
 
 
@@ -149,12 +148,12 @@ class IsotropicEnvelope(nn.Module):
             return jnp.array(charges / n_k[:shape[1]])[..., None].repeat(shape[2], 2)
         sigma = self.param(
             'sigma',
-            sigma_init if isinstance(self.sigma_init, str) else constant_init(self.sigma_init),
+            sigma_init if isinstance(self.sigma_init, str) else jnn.initializers.constant(self.sigma_init),
             (n_nuclei, self.out_dim, self.determinants)
         ).reshape(n_nuclei, -1)
         pi = self.param(
             'pi',
-            constant_init(self.pi_init),
+            jnn.initializers.constant(self.pi_init),
             (n_nuclei, self.out_dim * self.determinants)
         )
         sigma = nn.softplus(sigma)
@@ -258,6 +257,35 @@ class LogSumDet(nn.Module):
         return sign_out, log_out
 
 
+class Jastrow(nn.Module):
+    spins: tuple[int, int]
+    
+    @nn.compact
+    def __call__(self, r_ij):
+        a_par_w, a_anti_w = self.param(
+            'weight',
+            jnn.initializers.constant(1e-2),
+            (2,)
+        )
+        a_par, a_anti = self.param(
+            'alpha',
+            jnn.initializers.ones,
+            (2,)
+        )
+        r_ij = r_ij[..., -1]
+        uu, ud, du, dd = [
+            s
+            for split in jnp.split(r_ij, self.spins[:1], axis=0)
+            for s in jnp.split(split, self.spins[:1], axis=1)
+        ]
+        same = jnp.concatenate([uu.reshape(-1), dd.reshape(-1)])
+        diff = jnp.concatenate([ud.reshape(-1), du.reshape(-1)])
+        result = -(1/4) * a_par_w * (a_par**2 / (a_par + same)).sum()
+        result += -(1/2) * a_anti_w * (a_anti**2 / (a_anti + diff)).sum()
+        return result
+
+
+
 class FermiNet(nn.Module):
     charges: Tuple[int, ...]
     spins: Tuple[int, int]
@@ -314,26 +342,27 @@ class FermiNet(nn.Module):
                 jnn.initializers.zeros,
                 ()
             )
+        self.cusp_jastorw = Jastrow(self.spins)
 
     def encode(self, electrons, atoms):
         # Prepare input
         atoms = atoms.reshape(-1, 3) @ self.axes.value
         electrons = electrons.reshape(-1, 3) @ self.axes.value
-        h_one, h_two, r_im, _ = self.input_construction(electrons, atoms)
+        h_one, h_two, r_im, r_ij = self.input_construction(electrons, atoms)
 
         # Fermi interaction
         for fermi_layer in self.fermi_layers:
             h_one, h_two = fermi_layer(h_one, h_two)
 
-        return h_one, r_im
+        return h_one, r_im, r_ij
 
     def orbitals(self, electrons, atoms):
-        h_one, r_im = self.encode(electrons, atoms)
+        h_one, r_im, _ = self.encode(electrons, atoms)
         return self.to_orbitals(h_one, r_im)
 
     def signed(self, electrons, atoms):
         # Compute orbitals
-        h_one, r_im = self.encode(electrons, atoms)
+        h_one, r_im, r_ij = self.encode(electrons, atoms)
         orbitals = self.to_orbitals(h_one, r_im)
         # Compute log det
         sign, log_psi = self.logsumdet(orbitals)
@@ -341,6 +370,7 @@ class FermiNet(nn.Module):
         # Optional jastrow factor
         if self.jastrow_config is not None:
             log_psi += self.jastrow(h_one).mean() * self.jastrow_weight
+        log_psi += self.cusp_jastorw(r_ij)
 
         return sign, log_psi
 

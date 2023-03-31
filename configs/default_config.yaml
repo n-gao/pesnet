@@ -3,16 +3,17 @@ sampling:
   steps: 40
 
 optimization:
-  optimizer: sgd+clip
+  optimizer_args:
+    lr:
+      init: 1.e-1
+      decay: 1.0
+      delay: 1000.0
+    transformations:
+      - ['clip_by_global_norm', [1.0], {}]
   clip_local_energy: 5.0
-  clipping_method: ferminet
-  gradient: natural
-  max_norm: 1.0
-  lr:
-    init: 1.e-1
-    decay: 1.0
-    delay: 1000.0
+  clip_stat: median
   cg:
+    linearize: True
     damping:
       method: std_based
       init: 1.e-3
@@ -28,10 +29,14 @@ optimization:
 
 
 surrogate_optimization:
-  lr:
-    init: 1.e-4
-    delay: 5000.0
-    decay: 1.0
+  optimizer_args:
+    lr:
+      init: 1.e-4
+      delay: 5000.0
+      decay: 1.0
+    transformations:
+      - ['scale_by_adam', [], {}]
+      - ['add_decayed_weights', [], {}]
   n_steps: 5
   loss_decay: 0.999
   ema_decay_min: 0.99
@@ -50,13 +55,12 @@ training:
   eps: 0.001
 
 pretraining:
-  steps: 2000
+  steps: 10000
   single: False
   start_from_last: False
-  gnn_lr: 0
   method: ['rhf']
-  align_mo: False
-  distinct_orbitals: True
+  align_mo: True
+  distinct_orbitals: False
 
 log_every: 10
 transform_coordinates: True

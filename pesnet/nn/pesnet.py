@@ -1,33 +1,38 @@
 import functools
-from collections import namedtuple
 from copy import deepcopy
-from typing import Any, Callable, Dict, Iterable, List, Tuple, Union
+from typing import (Any, Callable, Dict, Iterable, List, NamedTuple, Tuple,
+                    Union)
 
+import flax.linen as nn
 import jax
 import jax.numpy as jnp
 import numpy as np
+from chex import ArrayTree, PRNGKey
 from jax.flatten_util import ravel_pytree
-from pesnet.nn import MLP, ParamTree
+
+from pesnet.nn import MLP
+from pesnet.nn.coords import find_axes
 from pesnet.nn.dimenet import DimeNet
 from pesnet.nn.ferminet import FermiNet
 from pesnet.nn.gnn import GNN, GNNPlaceholder
-from pesnet.nn.coords import find_axes
 from pesnet.utils import merge_dictionaries
+from pesnet.utils.typing import (OrbitalFunction, ParameterFunction,
+                                 Parameters, WaveFunction)
 
 TreeFilter = Dict[Any, Union[None, Any, 'TreeFilter']]
 
 
-def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jax.Array, Callable[[jax.Array], ParamTree]]:
+def ravel_chunked_tree(tree: ArrayTree, chunk_size: int = -1) -> Tuple[jax.Array, Callable[[jax.Array], ArrayTree]]:
     """This function takes a ParamTree and flattens it into a two day array
     with chunk_size as the first dimension. If chunk_size is < 0 the first dimension of
     the first array is taken.
 
     Args:
-        tree (ParamTree): ParamTree to ravel.
+        tree (ArrayTree): Parameter tree to ravel.
         chunk_size (int, optional): Chunk size. Defaults to -1.
 
     Returns:
-        Tuple[jax.Array, Callable[[jax.Array], ParamTree]]: chunked array, unravel function
+        Tuple[jax.Array, Callable[[jax.Array], ArrayTree]]: chunked array, unravel function
     """
     # This function takes a ParamTree and flattens it into a two day array
     # with chunk_size as the first dimension. If chunk_size is < 0 the first dimension of
@@ -39,7 +44,7 @@ def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jax.Array
     sizes = [x.shape[1] for x in xs]
     indices = np.cumsum(sizes)
 
-    def unravel(data: jax.Array) -> ParamTree:
+    def unravel(data: jax.Array) -> ArrayTree:
         if data is None or data.size == 0:
             return {}
         if data.ndim == 0:
@@ -55,7 +60,7 @@ def ravel_chunked_tree(tree: ParamTree, chunk_size: int = -1) -> Tuple[jax.Array
     return result, unravel
 
 
-def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = None) -> Tuple[ParamTree, ParamTree, Callable[[ParamTree, ParamTree], ParamTree]]:
+def extract_from_tree(tree: ArrayTree, filters: TreeFilter, chunk_size: int = None) -> Tuple[ArrayTree, ArrayTree, Callable[[ArrayTree, ArrayTree], ArrayTree]]:
     """Extarcts parameters from a parameter tree.
     Returns a copy of the tree without the filtered parameters.
     The filter is a dict:
@@ -69,19 +74,19 @@ def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = No
     If the value is not a dict it is interpreted as the laster filter step.
 
     Args:
-        tree (ParamTree): Parameters
+        tree (ArrayTree): Parameters
         filters (TreeFilter): Filter dictionary
         chunk_size (int, optional): Chunk size - useful to extract node features. Defaults to None.
 
     Returns:
-        Tuple[ParamTree, ParamTree, Callable[[ParamTree, ParamTree], ParamTree]]: parameters without the extracted, extracted, reconstruct function
+        Tuple[ArrayTree, ArrayTree, Callable[[ArrayTree, ArrayTree], ArrayTree]]: parameters without the extracted, extracted, reconstruct function
     """
     if chunk_size is not None:
         ravel_fn = functools.partial(ravel_chunked_tree, chunk_size=chunk_size)
     else:
         ravel_fn = ravel_pytree
 
-    def _extract_from_tree(tree: ParamTree, filters: TreeFilter) -> Tuple[ParamTree, ParamTree]:
+    def _extract_from_tree(tree: ArrayTree, filters: TreeFilter) -> Tuple[ArrayTree, ArrayTree]:
         unravel_fns = []
         out = []
         for k, f in filters.items():
@@ -133,10 +138,10 @@ def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = No
         deepcopy(tree), filters)
 
     def _reconstruct(
-            tree: ParamTree,
+            tree: ArrayTree,
             filters: TreeFilter,
             replacements: Iterable[jax.Array],
-            unravel_fn: Iterable[Callable[[jax.Array], jax.Array]]) -> ParamTree:
+            unravel_fn: Iterable[Callable[[jax.Array], jax.Array]]) -> ArrayTree:
         # This function uses that the tree traversal of the filters
         # does not change.
         # So, we can use iterators for the replacements and unravel functions and do not have
@@ -169,7 +174,7 @@ def extract_from_tree(tree: ParamTree, filters: TreeFilter, chunk_size: int = No
                     tree[k][f] = unravel(next(replacements))
         return tree
 
-    def reconstruct(tree: ParamTree, replacements: jax.Array, copy: bool = False) -> ParamTree:
+    def reconstruct(tree: ArrayTree, replacements: jax.Array, copy: bool = False) -> ArrayTree:
         if copy:
             tree = deepcopy(tree)
         if replacements is None:
@@ -228,64 +233,45 @@ def update_parameter_initialization(
     return weight, bias
 
 
-def get_default_filters(
-    fermi_params: ParamTree
-):
-    """Utility function to select the minimum set of parameters from fermi_params that
-    must be extracted to ensure that we capture the right symmetries.
-
-    Args:
-        fermi_params (ParamTree): FermiNet parametesr.
-        decomposition (ParamTree): FermiNet decomposition of the first player.
-        support_vectors (bool, optional): Whether vectors are supported - not used right now. Defaults to False.
-
-    Returns:
-        Tuple[dict, dict, dict, dict]: Filters for nodes, edges, global, node vectors and global vetors
-    """
-    node_filter = {
-        'params': {
-            'to_orbitals': {
-                f'IsotropicEnvelope_{i}': {
-                    'sigma': None,
-                    'pi': None
-                }
-                for i in range(2)
-            },
-            'input_construction': {
-                'nuc_embedding': None,
-                'nuc_temp': None
+DEFAULT_FILTER = {
+    'params': {
+        'to_orbitals': {
+            f'IsotropicEnvelope_{i}': {
+                'sigma': None,
+                'pi': None
             }
+            for i in range(2)
+        },
+        'input_construction': {
+            'nuc_embedding': None,
+            'nuc_bias': None,
         }
     }
-    return node_filter
+}
 
 
-PESNetFunctions = namedtuple(
-    'PESNetFunctions', [
-        'ferminet',
-        'gnn',
-        'get_fermi_params',
-        'pesnet_fwd',
-        'pesnet_orbitals',
-        'extract_node_params',
-        'extract_global_params',
-        'update_axes'
-    ])
+class PESNet(NamedTuple):
+    ferminet: FermiNet
+    gnn: nn.Module
+    get_fermi_params: ParameterFunction
+    pesnet_fwd: WaveFunction
+    pesnet_orbitals: OrbitalFunction
+    update_axes: ParameterFunction
 
 
 def make_pesnet(
-    key,
+    key: PRNGKey,
     charges: Tuple[int, ...],
     spins: Tuple[int, int],
-    gnn_params,
-    dimenet_params,
-    ferminet_params,
+    gnn_params: dict,
+    dimenet_params: dict,
+    ferminet_params: dict,
     node_filter: dict = {},
     global_filter: dict = {},
     include_default_filter: bool = True,
     meta_model: str = 'gnn',
     **kwargs
-) -> Tuple[ParamTree, PESNetFunctions]:
+) -> Tuple[Parameters, PESNet]:
     """Generate PESNet with parameters and all relevant functions.
 
     Args:
@@ -299,7 +285,7 @@ def make_pesnet(
         include_default_filter (bool, optional): Whether to include the default filters. Defaults to True.
 
     Returns:
-        Tuple[ParamTree, PESNetFucntions]: parameters, PESNet functions
+        Tuple[ArrayTree, PESNetFucntions]: parameters, PESNet functions
     """
     meta_model = meta_model.lower()
     assert meta_model in ['gnn', 'dimenet']
@@ -320,12 +306,6 @@ def make_pesnet(
         **ferminet_params
     )
 
-    batched_fermi = jax.vmap(ferminet.apply, in_axes=(None, 0, None))
-    batched_orbitals = jax.vmap(
-        functools.partial(ferminet.apply, method=ferminet.orbitals),
-        in_axes=(None, 0, None)
-    )
-
     # Initialization - we have to construct some toy data
     atoms = jnp.ones((len(charges), 3))
     electrons = jnp.zeros((sum(spins)*3))
@@ -334,8 +314,7 @@ def make_pesnet(
 
     # Construct default filters
     if include_default_filter:
-        default_node_filter = get_default_filters(fermi_params)
-        node_filter = merge_dictionaries(default_node_filter, node_filter)
+        node_filter = merge_dictionaries(DEFAULT_FILTER, node_filter)
 
     # Extract node features
     fermi_params, node_param_list, node_recover_fn = extract_from_tree(
@@ -407,15 +386,18 @@ def make_pesnet(
     params['ferminet']['constants']['axes'] = None
 
     find_axes_fn = functools.partial(find_axes, charges=jnp.array(charges))
-    def update_axes(params, atoms):
-        axes = find_axes_fn(atoms)
+    def update_axes(params, atoms, use_frame: bool = True):
+        if use_frame:
+            axes = find_axes_fn(atoms)
+        else:
+            axes = jnp.eye(3)
         if 'constants' in params['gnn']:
             params['gnn']['constants']['axes'] = axes
         params['ferminet']['constants']['axes'] = axes
         return params
 
-    def get_fermi_params(params, atoms):
-        params = update_axes(params, atoms)
+    def get_fermi_params(params, atoms, use_frame: bool = True):
+        params = update_axes(params, atoms, use_frame)
         gnn_params, fermi_params = params['gnn'], params['ferminet']
         node_features, global_features = gnn.apply(
             gnn_params,
@@ -425,35 +407,20 @@ def make_pesnet(
         fermi_params = global_reocver_fn(fermi_params, global_features)
         return fermi_params
 
-    def pesnet(params, electrons, atoms):
-        # We expect electrons to be batched!!!
-        fermi_params = get_fermi_params(params, atoms)
-        return batched_fermi(fermi_params, electrons, atoms)
+    def pesnet(params, electrons, atoms, use_frame: bool = True):
+        fermi_params = get_fermi_params(params, atoms, use_frame)
+        return ferminet.apply(fermi_params, electrons, atoms)
 
-    def pesnet_orbitals(params, electrons, atoms):
-        # We expect electrons to be batched!!!
-        fermi_params = get_fermi_params(params, atoms)
-        return batched_orbitals(fermi_params, electrons, atoms)
+    def pesnet_orbitals(params, electrons, atoms, use_frame: bool = True):
+        fermi_params = get_fermi_params(params, atoms, use_frame)
+        return ferminet.apply(fermi_params, electrons, atoms, method=ferminet.orbitals)
 
-    def extract_node_params(params):
-        new_tree, extracted = extract_from_tree(
-            params, node_filter, respect_chunks=True)[:2]
-        flat_extracted = ravel_chunked_tree(extracted, n_atoms)[0]
-        return new_tree, flat_extracted
-
-    def extract_global_params(params):
-        new_tree, extracted = extract_from_tree(params, global_filter)[:2]
-        flat_extracted = ravel_pytree(extracted)[0]
-        return new_tree, flat_extracted
-
-    result = PESNetFunctions(
+    result = PESNet(
         ferminet=ferminet,
         gnn=gnn,
         get_fermi_params=get_fermi_params,
         pesnet_fwd=pesnet,
         pesnet_orbitals=pesnet_orbitals,
-        extract_node_params=extract_node_params,
-        extract_global_params=extract_global_params,
         update_axes=update_axes
     )
     return params, result

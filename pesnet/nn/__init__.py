@@ -1,5 +1,5 @@
 import functools
-from typing import Any, Callable, Iterable, Mapping, Sequence, Union
+from typing import Callable, Sequence
 
 import flax.linen as nn
 import jax
@@ -7,10 +7,8 @@ import jax.numpy as jnp
 import numpy as np
 from jax.nn.initializers import normal, orthogonal, variance_scaling
 
-Activation = Union[str, Callable[[jax.Array], jax.Array]]
-ParamTree = Union[jax.Array,
-                  Iterable['ParamTree'],
-                  Mapping[Any, 'ParamTree']]
+
+Activation = str | Callable[[jax.Array], jax.Array]
 
 
 ACTIVATION_GAINS = {
@@ -20,7 +18,7 @@ ACTIVATION_GAINS = {
 }
 
 
-def activation_function(fn: Union[str, Activation]):
+def activation_function(fn: Activation):
     if callable(fn):
         return fn
     activations = {f.__name__: f for f in ACTIVATION_GAINS.keys()}
@@ -212,34 +210,3 @@ class ActivationWithGain(nn.Module):
 
 def named(name, module, *args, **kwargs):
     return type(name, (module,), {})(*args, **kwargs)
-
-
-class BesselRBF(nn.Module):
-    # Bessel RBF from Gasteiger et al. 2020
-    out_dim: int
-    cutoff: float
-
-    @nn.compact
-    def __call__(self, x):
-        f = self.param(
-            'f',
-            lambda *_: (jnp.arange(self.out_dim,
-                        dtype=jnp.float32) + 1) * jnp.pi,
-            (self.out_dim,)
-        )
-        c = self.param(
-            'c',
-            lambda *_: jnp.ones(()) * self.cutoff,
-            ()
-        )
-        x_ext = x[..., None] + 1e-8
-        result = jnp.sqrt(2./c) * jnp.sin(f*x_ext/c)/x_ext
-        return result.reshape(*x.shape, -1)
-
-
-def constant_init(val):
-    # We use our own constant init instead the one from jnn.initializers.constant
-    # because of backwards compatability
-    def init_fn(key, shape, dtype=jnp.float32):
-        return jnp.full(shape, val, dtype=dtype)
-    return init_fn

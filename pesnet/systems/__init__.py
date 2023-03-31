@@ -155,8 +155,8 @@ def cyclobutadiene(state: str = None, alpha: float = None):
             Atom('H', (-1.4404647e+00, 4.1824574e+00, -1.7640606e-16))
         ])
     else:
-        m1 = cyclobutadiene('ground').coords()
-        m2 = cyclobutadiene('transition').coords()
+        m1 = cyclobutadiene('ground').coords
+        m2 = cyclobutadiene('transition').coords
         return Molecule([
             Atom(c, p)
             for c, p in zip('CCCCHHHH', m1*alpha + (1-alpha)*m2)

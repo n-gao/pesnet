@@ -1,7 +1,8 @@
 from copy import deepcopy
 import numbers
 import time
-from typing import Callable
+from typing import Callable, NamedTuple
+from chex import ArrayTree
 
 import jax
 import jax.numpy as jnp
@@ -64,24 +65,34 @@ class ExponentiallyMovingAverage:
         return self._value / self._total_weight
 
 
+class EMA(NamedTuple):
+    data: ArrayTree
+    weight: jax.Array
+
+
 # EMA for usage in JAX
-def ema_make(tree):
-    return (jtu.tree_map(lambda x: jnp.zeros_like(x), tree), jnp.zeros(()))
+def ema_make(tree: ArrayTree) -> EMA:
+    return EMA(jtu.tree_map(lambda x: jnp.zeros_like(x), tree), jnp.zeros(()))
 
 
 @jax.jit
-def ema_update(data, value, decay):
-    tree, weight = data
-    return jtu.tree_map(lambda a, b: a*decay + b, tree, value), weight*decay + 1
+def ema_update(ema: EMA, value: ArrayTree, decay: jax.Array) -> EMA:
+    return EMA(
+        jtu.tree_map(lambda a, b: a*decay + b, ema.data, value),
+        ema.weight*decay + 1
+    )
 
 
 @jax.jit
-def ema_value(data, backup = None):
-    tree, weight = data
+def ema_value(ema: EMA, backup: ArrayTree = None) -> ArrayTree:
     if backup is None:
-        backup = tree
-    is_nan = weight == 0
-    return jtu.tree_map(lambda x, y: jnp.where(is_nan, y, x/weight), tree, backup)
+        backup = ema.data
+    is_nan = ema.weight == 0
+    return jtu.tree_map(
+        lambda x, y: jnp.where(is_nan, y, x/ema.weight),
+        ema.data,
+        backup
+    )
 
 
 p_ema_make = pmap(ema_make)

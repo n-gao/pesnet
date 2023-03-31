@@ -21,7 +21,7 @@ from pesnet.trainer import VmcTrainer
 from pesnet.utils import ExponentiallyMovingAverage, Stopwatch
 from pesnet.utils.jax_utils import broadcast, replicate
 from pesnet.vmc.eval import eval_energy_sequential
-from pesnet.vmc.training import coordinate_transform, init_electrons
+from pesnet.vmc.update import init_electrons
 
 jax.config.update('jax_default_matmul_precision', 'float32')
 
@@ -43,7 +43,6 @@ def pretrain(
     steps: int,
     single: bool,
     start_from_last: bool,
-    gnn_lr: float,
     method: Tuple[str],
     checkpoint_dir: str = None,
     align_mo: bool = False,
@@ -53,25 +52,25 @@ def pretrain(
         return None, None
     # Select pretraining system
     current_systems = system_configs.get_current_systems()
-    charges = current_systems[0].charges()
-    spins = current_systems[0].spins()
+    charges = current_systems[0].charges
+    spins = current_systems[0].spins
     if single:
         pretrain_system = current_systems[len(current_systems)//2]
-        pretrain_atoms = replicate(pretrain_system.coords()[None])
-        scfs = [pretrain_system.to_scf(verbose=3)]
+        pretrain_atoms = replicate(pretrain_system.coords[None])
+        scfs = [pretrain_system.to_scf()]
     else:
-        pretrain_atoms = system_configs.get_current_atoms(jax.device_count()).repeat(len(method), axis=1)
+        pretrain_atoms = system_configs.get_current_atoms()
         # If we don't train all determinants to all HF solutions, we can save a lot of work by
         # dropping the unused configurations
         if distinct_orbitals:
-            k = vmc.pesnet_fns.ferminet.determinants // len(method)
+            k = vmc.pesnet_fns.ferminet.determinants
             if len(current_systems) > k:
-                idx = np.linspace(0, pretrain_atoms.shape[0] - 1, k).astype(int)
+                idx = np.linspace(0, len(current_systems) - 1, k).astype(int)
                 current_systems = [current_systems[i] for i in idx]
-                pretrain_atoms = pretrain_atoms.reshape(-1, *pretrain_atoms.shape[2:])
-                pretrain_atoms = pretrain_atoms[idx].reshape(jax.device_count(), -1, *pretrain_atoms.shape[1:])
+                pretrain_atoms = pretrain_atoms[idx]
+        pretrain_atoms = replicate(pretrain_atoms.repeat(len(method), axis=0))
         scfs = [
-            s.to_scf(verbose=3, restricted=m=='rhf')
+            s.to_scf(restricted=m=='rhf')
             for s in current_systems
             for m in method
         ]
@@ -90,13 +89,11 @@ def pretrain(
 
     # Init electrons
     key, subkey = jax.random.split(key)
-    electrons = init_electrons(pretrain_atoms, charges,
-                            spins, batch_size, subkey)
-    electrons = broadcast(electrons)
+    electrons = init_electrons(subkey, pretrain_atoms[0], charges, spins, batch_size)
+    electrons = broadcast(electrons.reshape(jax.device_count(), -1, *electrons.shape[1:]))
     
     logging.info('Pretraining')
     with trange(steps) as iters:
-        vmc.initialize_pretrain_optimizer(gnn_lr=gnn_lr, distinct_orbitals=distinct_orbitals)
         for step in iters:
             loss, electrons, pmove = vmc.pre_update_step(
                 electrons, pretrain_atoms, scfs)
@@ -116,7 +113,7 @@ def pretrain(
     return electrons, [s.energy for s in scfs]
 
 
-def name_fn(system, **_):
+def name_fn(system):
     val_configs = make_system_collection(
         getattr(systems, system['name']),
         **system['validation'],
@@ -126,7 +123,7 @@ def name_fn(system, **_):
     return str(val_systems[0])
 
 
-@automain(ex, name_fn, default_folder='~/logs/planet')
+@automain(ex, name_fn, default_folder='~/logs/pesnet')
 def run(
     system: dict,
     pesnet: dict,
@@ -164,8 +161,8 @@ def run(
     val_systems = val_configs.get_current_systems()
     val_atoms = val_configs.get_current_atoms(n_devices)
     current_systems = system_configs.get_current_systems()
-    charges = current_systems[0].charges()
-    spins = current_systems[0].spins()
+    charges = current_systems[0].charges
+    spins = current_systems[0].spins
     
     key, subkey = jax.random.split(key)
     logging.info('Initialization')
@@ -177,7 +174,8 @@ def run(
         sampling,
         optimization,
         surrogate,
-        surrogate_optimization
+        surrogate_optimization,
+        pretraining
     )
 
     # Pretraining
@@ -202,9 +200,9 @@ def run(
     atoms = broadcast(system_configs.get_current_atoms(n_devices))
     if electrons is None or atoms.shape[:2] != electrons.shape[:2]:  # Only resample electrons if we have to
         key, subkey = jax.random.split(key)
-        electrons = init_electrons(atoms, charges,
-                                    spins, training['batch_size'], subkey)
-        electrons = broadcast(electrons)
+        electrons = init_electrons(subkey, atoms[0], charges,
+                                    spins, training['batch_size'])
+        electrons = broadcast(electrons.reshape(jax.device_count(), -1, *electrons.shape[1:]))
     logging.info('Thermalizing')
     electrons = vmc.thermalize_samples(
         electrons,
@@ -214,7 +212,6 @@ def run(
         adapt_step_width=True
     )
 
-    vmc.initialize_optimizer()
     if hf_energies is not None:
         vmc.offset += jnp.mean(jnp.array(hf_energies))
     energies = []
@@ -259,24 +256,24 @@ def run(
             system_configs.update_configs()
             new_atoms = broadcast(system_configs.get_current_atoms(n_devices))
             if transform_coordinates:
-                electrons = coordinate_transform(atoms, new_atoms, electrons)
+                electrons = vmc.coordinate_transform(atoms, new_atoms, electrons)
             atoms = new_atoms
 
             # Do update step
-            electrons, (e_l, E_by_config, E_var_by_config,
-                        pmove), aux_data = vmc.update_step(electrons, atoms)
-            E_by_config = np.array(E_by_config).reshape(-1)
-            E_var_by_config = np.array(E_var_by_config).reshape(-1)
+            result, aux_data = vmc.update_step(electrons, atoms)
+            electrons = result.electrons
+            E_by_config = np.array(result.energies).reshape(-1)
+            E_var_by_config = np.array(result.energy_variances).reshape(-1)
 
             if log_energies:
                 a_dset[step] = np.asarray(atoms)
-                e_dset[step] = np.asarray(e_l)
+                e_dset[step] = np.asarray(result.local_energies)
 
             # Compute metrics
             E = np.mean(E_by_config)
             E_var = np.mean(E_var_by_config)
             E_std = np.mean(np.sqrt(E_var_by_config))
-            pmove = np.mean(pmove)
+            pmove = np.mean(result.pmove)
             energies.append(E)
             energy_variances.append(E_var)
             pmoves.append(pmove)
@@ -284,7 +281,7 @@ def run(
 
             # NaN check
             if np.isnan(E).any():
-                raise ValueError("Detected NaN during training.")
+                raise ValueError(f"Detected NaN during training in step {step}!")
 
             # Log everything
             if step % log_every == 0:
@@ -317,12 +314,12 @@ def run(
                         else:
                             logger.add_scalar(f'train_comp/{sub_configs[i]}-{sub_configs[comparison_idx]}/E', (val - E_comp) * HARTREE_TO_KCAL, step=step)
                 
-                # Log CG aux data
+                # Log aux data
                 logger.add_scalar_dict(aux_data, step=step)
 
             # Log parameters
             if step % (log_every*10) == 0:
-                E_gnn = vmc.surrogate_energies(val_atoms).reshape(-1)
+                E_gnn = vmc.surrogate_energies(val_atoms)[0]
                 logger.add_scalar('train/val_E', E_gnn.mean(), step=step)
 
                 if step < 1000 or step % 1000 == 0:
@@ -346,7 +343,7 @@ def run(
                                 },
                                 'gnn_params': vmc.params['gnn'],
                                 'fermi_params': vmc.get_fermi_params(val_atoms),
-                                'surr_params': vmc.s_params,
+                                'surr_params': vmc.surr_state.params,
                             },
                             n_bins=100,
                             step=step
@@ -396,7 +393,7 @@ def run(
     )
 
     logging.info('Plotting')
-    E_gnn = vmc.surrogate_energies(val_atoms).reshape(-1)
+    E_gnn = vmc.surrogate_energies(val_atoms)[0]
     plt.errorbar(np.arange(len(E_final)), E_final, yerr=E_final_err, label='MC')
     plt.plot(np.arange(len(E_gnn)), E_gnn, label='GNN')
     plt.legend()

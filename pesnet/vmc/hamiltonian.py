@@ -1,11 +1,12 @@
+from chex import ArrayTree
 import jax
 import jax.numpy as jnp
 from jax import lax
 
-from pesnet.nn import ParamTree
+from pesnet.utils.typing import EnergyFn, WaveFunction
 
 
-def make_kinetic_energy_function(f):
+def make_kinetic_energy_function(f: WaveFunction) -> EnergyFn:
     """Returns a function that computes the kinetic energy for wave function f.
 
     Args:
@@ -13,11 +14,11 @@ def make_kinetic_energy_function(f):
         use_fast_path (bool, optional): Whether to use the fast pass for small systems. 
             Defaults to True.
     """
-    def laplacian_of_f(params: ParamTree, electrons: jax.Array, atoms: jax.Array) -> jax.Array:
+    def laplacian_of_f(params: ArrayTree, electrons: jax.Array, atoms: jax.Array) -> jax.Array:
         """Computes the kinetic energy for the given parameters.
 
         Args:
-            params (ParamTree): wave function parameters
+            params (ArrayTree): wave function parameters
             electrons (jax.Array): (N, 3) electrons
             atoms (jax.Array): (M, 3) nuclei
 
@@ -69,7 +70,7 @@ def potential_energy(electrons: jax.Array, atoms: jax.Array, charges: jax.Array)
     return v_ee + v_ae + v_aa
 
 
-def make_local_energy_function(f, atoms: jax.Array, charges: jax.Array):
+def make_local_energy_function(f: WaveFunction, atoms: jax.Array, charges: jax.Array) -> EnergyFn:
     """Returns a function that computes the local energy for wave function f
     with the given atoms and charges.
 
@@ -85,7 +86,7 @@ def make_local_energy_function(f, atoms: jax.Array, charges: jax.Array):
     kinetic_energy_fn = make_kinetic_energy_function(f)
 
     def local_energy(
-            params,
+            params: ArrayTree,
             electrons: jax.Array,
             atoms: jax.Array = atoms,
             charges: jax.Array = charges) -> jax.Array:

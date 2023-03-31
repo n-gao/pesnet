@@ -1,15 +1,15 @@
-from dataclasses import field
 import functools
 from typing import Sequence, Tuple
 
 import flax.linen as nn
+import jax
+import jax.nn as jnn
 import jax.numpy as jnp
 import jraph
 import numpy as np
 
-from pesnet.nn import (Activation, AutoMLP, BesselRBF, Dense, Embed,
-                       named, residual)
-from pesnet.nn.spherical_basis import make_positional_encoding
+from pesnet.nn import (Activation, ActivationWithGain, AutoMLP, Dense,
+                       Dense_no_bias, Embed, named, residual)
 
 
 class MessagePassing(nn.Module):
@@ -21,12 +21,13 @@ class MessagePassing(nn.Module):
     def __call__(self, n_embed, e_embed, senders, receivers):
         inp_features = jnp.concatenate([
             n_embed[senders],
-            n_embed[receivers],
-            e_embed
+            n_embed[receivers]
         ], axis=-1)
+        inp_features = AutoMLP(self.out_dim, self.n_layers,
+                activation=self.activation)(inp_features)
+        inp_features *= Dense_no_bias(inp_features.shape[-1])(e_embed)
         return jraph.segment_mean(
-            AutoMLP(self.out_dim, self.n_layers,
-                    activation=self.activation)(inp_features),
+            inp_features,
             senders,
             num_segments=n_embed.shape[0],
             indices_are_sorted=True
@@ -59,6 +60,25 @@ class NodeOut(nn.Module):
 GlobalOut = functools.partial(named, 'GlobalOut', AutoMLP)
 
 
+class DenseEdgeEmbedding(nn.Module):
+    out_dim: int
+    activation: str
+    sigma_init: float
+
+    @nn.compact
+    def __call__(self, edges):
+        sigma = self.param(
+            'sigma',
+            lambda key, shape, dtype=jnp.float32: jax.random.normal(key, shape, dtype) + self.sigma_init,
+            (self.out_dim,)
+        )
+        env = Dense_no_bias(self.out_dim)(jnp.exp(-(edges[..., -1:]/sigma)**2))
+        result = Dense(self.out_dim, bias_init=jnn.initializers.normal(2.0))(edges)
+        result = ActivationWithGain(self.activation)(result)
+        result = nn.LayerNorm()(result)
+        return result * env
+
+
 class GNN(nn.Module):
     charges: Tuple[int, ...]
     node_out_dims: Tuple[int, ...]
@@ -68,16 +88,9 @@ class GNN(nn.Module):
     msg_mlp_depth: int = 2
     update_mlp_depth: int = 2
     out_mlp_depth: int = 2
-    rbf: nn.Module = BesselRBF
     rbf_dim: int = 32
     rbf_cutoff: float = 10.0
     aggregate_before_out: bool = True
-    directional_edge: bool = False
-    pos_encoding_config: dict = field(default_factory=lambda *_: {
-        'cutoff': 5.,
-        'n_sph': 7,
-        'n_rad': 6
-    })
     activation: Activation = nn.silu
 
     @nn.compact
@@ -99,23 +112,14 @@ class GNN(nn.Module):
 
         # Edge embedding
         edges = nuclei[senders] - nuclei[receivers]
-        if self.directional_edge:
-            e_embed = Dense(self.embedding_dim)(jnp.concatenate([
-                self.rbf(self.rbf_dim, self.rbf_cutoff)(jnp.linalg.norm(edges, axis=-1)),
-                make_positional_encoding(7, 6, 10)(edges)
-            ], axis=-1))
-        else:
-            e_embed = self.rbf(self.rbf_dim, self.rbf_cutoff)(jnp.linalg.norm(edges, axis=-1))
+        edges = jnp.concatenate([
+            edges,
+            jnp.linalg.norm(edges, axis=-1, keepdims=True)
+        ], -1)
+        e_embed = DenseEdgeEmbedding(self.rbf_dim, self.activation, self.rbf_cutoff)(edges)
 
         # Node embedding
-        n_embed = Embed(
-            max_charge,
-            self.embedding_dim
-        )(charges)
-        if self.pos_encoding_config is not None:
-            pos_encode = make_positional_encoding(**self.pos_encoding_config)
-            pos_embed = pos_encode(nuclei - nuclei.mean(-2, keepdims=True))
-            n_embed = jnp.concatenate([n_embed, pos_embed], axis=-1)
+        n_embed = Embed(max_charge, self.embedding_dim)(charges)
 
         # Message passing and update
         embeddings = [n_embed]

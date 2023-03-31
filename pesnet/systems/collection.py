@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from pesnet import systems
 from pesnet.utils import merge_dictionaries
+from pesnet.utils.jax_utils import replicate
 
 
 class ConfigCollection:
@@ -38,8 +39,7 @@ class ConfigCollection:
     def get_current_atoms(self, n_devices=None):
         result = systems_to_coords(self.get_current_systems())
         if n_devices is not None:
-            assert self.n_configs % n_devices == 0
-            return result.reshape(n_devices, self.n_configs//n_devices, -1, 3)
+            return replicate(result)
         return result
 
 
@@ -268,8 +268,7 @@ class JointCollection:
             result.append(col.get_current_atoms(None))
         result = jnp.concatenate(result, axis=0)
         if n_devices is not None:
-            assert result.shape[0] % n_devices == 0
-            return result.reshape(n_devices, result.shape[0]//n_devices, -1, 3)
+            return replicate(result)
         return result
     
     @cached_property
@@ -292,6 +291,6 @@ def make_system_collection(constructor, collection_type=None, **kwargs):
 
 def systems_to_coords(systems):
     return jnp.array(np.stack([
-        s.coords()
+        s.coords
         for s in systems
     ], axis=0))

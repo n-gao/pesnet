@@ -6,8 +6,10 @@ is composed by a set of atoms.
 The classes contain simple logic functions to obtain spins, charges
 and coordinates for molecules.
 """
+from functools import cached_property
 import math
 import numbers
+import re
 from typing import Counter, Optional, Sequence, Tuple
 
 import numpy as np
@@ -42,54 +44,80 @@ class Atom:
     def symbol(self):
         return self.element.symbol
 
-    def __str__(self) -> str:
+    def __str__(self):
         return self.element.symbol
+    
+    def __repr__(self):
+        return f'{self.element.symbol} {str(self.position)}'
+    
+    @staticmethod
+    def from_repr(rep):
+        symbol = rep.split(' ')[0]
+        position = ' '.join(rep.split(' ')[1:])
+        position = re.findall(r'([+-]?[0-9]+([.][0-9]*)?|[.][0-9]+)', position)
+        position = [float(p[0]) for p in position]
+        return Atom(symbol, position)
 
 
 class Molecule:
+    atoms: Tuple[Atom]
+    _spins: Optional[Tuple[int, int]]
+
     def __init__(self, atoms: Sequence[Atom], spins: Optional[Tuple[int, int]] = None) -> None:
         self.atoms = atoms
         self._spins = spins
 
+    @cached_property
     def charges(self):
         return tuple(a.atomic_number for a in self.atoms)
 
+    @cached_property
     def coords(self):
         coords = np.array([a.coords for a in self.atoms], dtype=np.float32)
         coords -= coords.mean(0, keepdims=True)
         return coords
 
+    @cached_property
     def spins(self):
         if self._spins is not None:
             return self._spins
         else:
-            n_electrons = sum(self.charges())
+            n_electrons = sum(self.charges)
             return (math.ceil(n_electrons/2), math.floor(n_electrons/2))
-
-    def to_scf(self, basis='STO-6G', restricted: bool = False, verbose: int = 3):
+    
+    def to_pyscf(self, basis='STO-6G', verbose: int = 3):
         mol = gto.Mole(atom=[
-            [a.symbol, coords.tolist()]
-            for a, coords in zip(self.atoms, np.array(self.coords()))
-        ], basis=basis, unit='bohr', verbose=verbose)
-        spins = self.spins()
-        mol.spin = spins[0] - spins[1]
-        nuc_charge = sum(a.atomic_number for a in self.atoms)
-        e_charge = sum(spins)
-        mol.charge = nuc_charge - e_charge
+            [a.symbol, p]
+            for a, p in zip(self.atoms, self.coords)
+        ], unit='bohr', basis=basis, verbose=verbose)
+        mol.spin = self.spins[0] - self.spins[1]
+        mol.charge = sum(self.charges) - sum(self.spins)
         mol.build()
-        return Scf(mol, restricted)
+        return mol
+
+    def to_scf(self, basis='STO-6G', restricted: bool = True, verbose: int = 3):
+        return Scf(self.to_pyscf(basis, verbose), restricted)
 
     def __str__(self) -> str:
         result = ''
         if len(self.atoms) == 1:
             result = str(self.atoms[0])
-        elif len(self.atoms) == 2:
-            result = f'{str(self.atoms[0])}-{str(self.atoms[1])}'
         else:
             vals = dict(Counter(str(a) for a in self.atoms))
-            result = ''.join(f'{key}{val}' for key, val in vals.items())
-        if sum(self.spins()) < sum(self.charges()):
+            result = ''.join(str(key) + (str(val) if val > 1 else '') for key, val in vals.items())
+        if sum(self.spins) < sum(self.charges):
             result += 'plus'
-        elif sum(self.spins()) > sum(self.charges()):
+        elif sum(self.spins) > sum(self.charges):
             result += 'minus'
         return result
+    
+    def __repr__(self) -> str:
+        atoms = '\n'.join(map(repr, self.atoms))
+        return f'Spins: {self.spins}\n{atoms}'
+    
+    @staticmethod
+    def from_repr(rep):
+        return Molecule([Atom.from_repr(r) for r in rep.split('\n')[1:]])
+
+    def __hash__(self):
+        return hash((self.spins, self.charges))

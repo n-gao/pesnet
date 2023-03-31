@@ -7,6 +7,7 @@ import os
 from typing import Optional, Tuple
 
 import numpy as np
+from scipy.optimize import minimize, linear_sum_assignment
 import pyscf
 
 
@@ -70,53 +71,67 @@ class Scf:
         return mo_values
 
 
-def align_signs(scfs):
-    # Let's use the the center molecule to avoid extreme behavior
-    center_idx = len(scfs)//2
-    scfs = [scfs[center_idx]] + scfs[:center_idx] + scfs[center_idx+1:]
-    mo_coeffs = np.array([s.mo_coeff for s in scfs])
-    reference = mo_coeffs[0]
-    to_align = mo_coeffs[1:]
-    no_change = reference - to_align
-    change = reference + to_align
-    signs = 2*(np.abs(no_change).sum(-2, keepdims=True) < np.abs(change).sum(-2, keepdims=True)) - 1
-    for scf, s in zip(scfs[1:], signs):
-        scf.signs = s
+def to_mat(x):
+    mat = x.reshape(np.sqrt(x.size).astype(int), -1)
+    a = np.exp(np.linalg.slogdet(mat)[1] / mat.shape[0])
+    return mat/a
 
 
-def align_scfs(scfs):
-    # Let's use the the center molecule to avoid extreme behavior
+def make_loss(target, coeff):
+    def loss(x):
+        mat = to_mat(x)
+        pred = coeff@mat
+        # ignore signs
+        return np.minimum(
+            ((target - pred)**2).sum(0),
+            ((target + pred)**2).sum(0)
+        ).sum()
+    def perm_loss(x):
+        mat = to_mat(x)
+        n = mat.shape[0]
+        def compute_loss(i, j):
+            test = np.copy(mat)
+            test[:, [j, i]] = test[:, [i, j]]
+            return loss(test)
+        result = np.vectorize(compute_loss)(*np.where(np.ones((n, n)))).reshape(n, n)
+        return result
+    return loss, perm_loss
+
+
+def align_scf(target: Scf, source: Scf, maxiter=20):
+    result = []
+    n = (target._mean_field.mo_occ > 0).sum()
+    for tar_mat, src_mat in zip(target.mo_coeff, source.mo_coeff):
+        tar, src = tar_mat[:, :n], src_mat[:, :n]
+        loss, perm_loss = make_loss(tar, src)
+        best_loss = np.inf
+        mat = np.eye(n)
+        for i in range(maxiter):
+            perm = linear_sum_assignment(perm_loss(mat))[1]
+            mat = mat[..., perm]
+            opt_result = minimize(loss, mat.reshape(-1))
+            mat = to_mat(opt_result.x)
+            if np.abs(best_loss - opt_result.fun) < 1e-5:
+                break
+            best_loss = opt_result.fun
+            if i == maxiter:
+                raise RuntimeError("Reached maxiter.")
+        signs = -2 * np.argmin(np.stack([
+            ((tar - src@mat)**2).sum(0),
+            ((tar + src@mat)**2).sum(0),
+        ], -1), -1) + 1 
+        result.append(np.concatenate([
+            src[:, :n]@(mat*signs),
+            src_mat[:, n:]
+        ], axis=-1))
+        print(f'MO initial loss: {loss(np.eye(n))}; final loss: {best_loss}')
+    source.mo_coeff = np.array(result)
+
+
+def align_scfs(scfs: tuple[Scf]):
     center_idx = len(scfs)//2
-    center = scfs[center_idx]
+    target = scfs[center_idx]
     scfs = scfs[:center_idx] + scfs[center_idx+1:]
-    base = center.mo_coeff
-    for scf in scfs:
-        new_mos = []
-        for i in range(base.shape[0]):
-            if center._mean_field.mo_occ.ndim == 2:
-                occ = center._mean_field.mo_occ[i] > 0
-            else:
-                occ = center._mean_field.mo_occ > 0
-            base_mo = base[i][:, occ]
-            mo = scf.mo_coeff[i][:, occ]
-            # Compute pairwise distances between all MOs with and without sign flip
-            dists = np.abs(base_mo[..., None] - mo[:, None]).sum(0)
-            flipped_dists = np.abs(base_mo[..., None] + mo[:, None]).sum(0)
-            A = np.stack([dists, flipped_dists], axis=-1)
-            cols = np.arange(mo.shape[1])
 
-            # Iteratively select pairs by their closest distance
-            result = []
-            while A.size > 0:
-                row = A[0]
-                idx = row.argmin(0)
-                sign_idx = row[(idx, np.arange(2))].argmin()
-                result.append((cols[idx[sign_idx]], 1-2*sign_idx))
-                A = np.delete(A[1:], idx[sign_idx], 1)
-                cols = np.delete(cols, idx[sign_idx], 0)
-
-            result = np.array(result)
-            new_mo = np.copy(scf.mo_coeff[i])
-            new_mo[:, occ] = mo[:, result[:, 0].astype(int)] * result[:, 1].astype(int)
-            new_mos.append(new_mo)
-        scf.mo_coeff = np.array(new_mos)
+    for source in scfs:
+        align_scf(target, source)
