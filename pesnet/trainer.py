@@ -153,10 +153,7 @@ class VmcTrainer:
         self.pm_pesnet = pmap(self.batch_pesnet)
         # We disable the equivariant frame for pretraining
         self.batch_pesnet_orbitals: OrbitalFunction = jax.vmap(jax.vmap(
-            functools.partial(
-                self.pesnet_fns.pesnet_orbitals,
-                use_frame=False
-            ),
+            self.pesnet_fns.pesnet_orbitals,
             in_axes=conf_axes_pes),
             in_axes=elec_axes
         )

@@ -5,6 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 
+@jax.jit
 def find_axes(atoms: jax.Array, charges: jax.Array) -> jax.Array:
     """Generates equivariant axes based on PCA.
 

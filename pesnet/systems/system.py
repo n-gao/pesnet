@@ -6,16 +6,18 @@ is composed by a set of atoms.
 The classes contain simple logic functions to obtain spins, charges
 and coordinates for molecules.
 """
-from functools import cached_property
 import math
 import numbers
 import re
 from typing import Counter, Optional, Sequence, Tuple
 
 import numpy as np
-from pesnet.systems.constants import ANGSTROM_TO_BOHR
-from pesnet.systems import ELEMENT_BY_ATOMIC_NUM, ELEMENT_BY_SYMBOL
 from pyscf import gto
+
+from pesnet.nn.coords import find_axes
+from pesnet.systems import ELEMENT_BY_ATOMIC_NUM, ELEMENT_BY_SYMBOL
+from pesnet.systems.constants import ANGSTROM_TO_BOHR
+from pesnet.systems.element import Element
 from pesnet.systems.scf import Scf
 
 
@@ -26,6 +28,8 @@ class Atom:
             self.element = ELEMENT_BY_SYMBOL[name]
         elif isinstance(name, numbers.Number):
             self.element = ELEMENT_BY_ATOMIC_NUM[name]
+        elif isinstance(name, Element):
+            self.element = name
         else:
             raise ValueError()
         self.coords = coords
@@ -48,7 +52,7 @@ class Atom:
         return self.element.symbol
     
     def __repr__(self):
-        return f'{self.element.symbol} {str(self.position)}'
+        return f'{self.element.symbol} {str(self.coords)}'
     
     @staticmethod
     def from_repr(rep):
@@ -65,19 +69,24 @@ class Molecule:
 
     def __init__(self, atoms: Sequence[Atom], spins: Optional[Tuple[int, int]] = None) -> None:
         self.atoms = atoms
+        axes = np.asarray(find_axes(self.coords, np.array(self.charges)))
+        coords = self.coords@axes
+        idx = sorted(range(len(atoms)), key=lambda i: tuple(coords[i]))
+        atoms = [Atom(atoms[i].element, coords[i]) for i in idx]
+        self.atoms = sorted(atoms, key=lambda a: a.atomic_number)
         self._spins = spins
 
-    @cached_property
+    @property
     def charges(self):
         return tuple(a.atomic_number for a in self.atoms)
 
-    @cached_property
+    @property
     def coords(self):
         coords = np.array([a.coords for a in self.atoms], dtype=np.float32)
         coords -= coords.mean(0, keepdims=True)
         return coords
 
-    @cached_property
+    @property
     def spins(self):
         if self._spins is not None:
             return self._spins
