@@ -12,6 +12,9 @@ and Planet and PESNet++ from
 by Nicholas Gao, Stephan Günnemann <br>
 published at ICLR 2023
 
+### Generalizing Neural Wave Functions
+If you're looking for the code of our ICML paper, please check out our [`globe`](https://github.com/n-gao/globe) repository.
+
 ## Run the code
 First install [JAX](https://github.com/google/jax) and the correct [CUDA Toolkit](https://anaconda.org/anaconda/cudatoolkit) and [CUDNN](https://anaconda.org/anaconda/cudnn), then this package via
 ```bash
