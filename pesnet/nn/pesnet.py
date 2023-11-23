@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 from chex import ArrayTree, PRNGKey
+from flax.core import unfreeze
 from jax.flatten_util import ravel_pytree
 
 from pesnet.nn import MLP
@@ -310,7 +311,7 @@ def make_pesnet(
     atoms = jnp.ones((len(charges), 3))
     electrons = jnp.zeros((sum(spins)*3))
     key, subkey = jax.random.split(key)
-    fermi_params = ferminet.init(subkey, electrons, atoms).unfreeze()
+    fermi_params = unfreeze(ferminet.init(subkey, electrons, atoms))
 
     # Construct default filters
     if include_default_filter:
@@ -345,7 +346,7 @@ def make_pesnet(
     else:
         gnn = GNNPlaceholder()
     key, subkey = jax.random.split(key)
-    gnn_params = gnn.init(subkey, atoms).unfreeze()
+    gnn_params = unfreeze(gnn.init(subkey, atoms))
 
     # We need to reinitialize these arrays such that specific initializations are preserved
     # e.g., the standard deviation of parameters or specifically initialized varibles (e.g. to one or identity)

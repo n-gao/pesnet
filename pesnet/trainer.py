@@ -10,6 +10,7 @@ import numpy as np
 import optax
 import tqdm.auto as tqdm
 from chex import ArrayTree, PRNGKey
+from flax.core import unfreeze
 
 from pesnet.nn.dimenet import DimeNet
 from pesnet.nn.pesnet import make_pesnet
@@ -169,7 +170,7 @@ class VmcTrainer:
         # GNN Energy computation
         self.surrogate = DimeNet([], [1], charges, **surrogate_config)
         self.key, subkey = jax.random.split(self.key)
-        s_params = replicate(self.surrogate.init(subkey, jnp.ones((len(charges), 3))).unfreeze())
+        s_params = replicate(unfreeze(self.surrogate.init(subkey, jnp.ones((len(charges), 3)))))
         self.surrogate_fwd: Surrogate = lambda params, nuclei: self.surrogate.apply(params, nuclei)[1][0].squeeze()
         self.batch_energy = jax.vmap(self.surrogate_fwd, in_axes=(None, 0))
         self.pm_energy = pmap(self.batch_energy)
