@@ -5,7 +5,7 @@ install_requires = [
     'scipy',
     'tqdm',
     'jax>=0.4, <0.5',
-    'flax',
+    'flax<=0.7.0',
     'jraph',
     'pyscf',
     'optax',
