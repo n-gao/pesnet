@@ -12,10 +12,11 @@ install_requires = [
     'sympy',
     'matplotlib',
     'uncertainties',
-    'seml>=0.3, <0.4',
-    'seml_logger @ git+https://github.com/n-gao/seml_logger.git@5eb5f19d1694d858af0c727291284e16a8d190e1#egg=seml_logger',
+    'seml>=0.3',
+    'seml_logger @ git+https://github.com/n-gao/seml_logger.git@c1c57611af882fe65f61ebd123ba7228b0fec423#egg=seml_logger',
     'aim>=3.0, <4.0',
-    'sacred>=0.8.4, <0.9'
+    'sacred>=0.8.4, <0.9',
+    'matplotlib'
 ]
 
 
