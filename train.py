@@ -107,9 +107,9 @@ def pretrain(
             if step % 200 == 0:
                 with logger.without_aim():
                     if 'gnn' in vmc.params:
-                        logger.add_distribution_dict(vmc.params['gnn'], 'pre_gnn', n_bins=100, step=step)
+                        logger.add_distribution_dict(vmc.params['gnn'], 'pre_gnn', step=step)
                     fermi_params = vmc.get_fermi_params(pretrain_atoms)
-                    logger.add_distribution_dict(fermi_params, 'pre_fermi', n_bins=100, step=step)
+                    logger.add_distribution_dict(fermi_params, 'pre_fermi', step=step)
     return electrons, [s.energy for s in scfs]
 
 
@@ -295,7 +295,7 @@ def run(
 
                 # Config histograms
                 with logger.without_aim():
-                    logger.add_distribution_dict(system_configs.get_current_conf_vals(), 'config', n_bins=20, step=step)
+                    logger.add_distribution_dict(system_configs.get_current_conf_vals(), 'config', step=step)
                 
                 if sub_configs is not None:
                     for i in range(len(sub_configs)):
@@ -345,7 +345,6 @@ def run(
                                 'fermi_params': vmc.get_fermi_params(val_atoms),
                                 'surr_params': vmc.surr_state.params,
                             },
-                            n_bins=100,
                             step=step
                         )
             
