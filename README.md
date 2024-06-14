@@ -70,7 +70,7 @@ Please cite our paper if you use our method or code in your own works:
 ```
 @inproceedings{gao_pesnet_2022,
     title = {Ab-Initio Potential Energy Surfaces by Pairing GNNs with Neural Wave Functions},
-    author = {Gao, Nicholas and G{\"u}nnemann, Stephan}
+    author = {Gao, Nicholas and G{\"u}nnemann, Stephan},
     booktitle = {International Conference on Learning Representations (ICLR)},
     year = {2022}
 }
@@ -78,7 +78,7 @@ Please cite our paper if you use our method or code in your own works:
 ```
 @inproceedings{gao_planet_2023,
     title = {Sampling-free Inference of Ab-initio Potential Energy Surface Networks},
-    author = {Gao, Nicholas and G{\"u}nnemann, Stephan}
+    author = {Gao, Nicholas and G{\"u}nnemann, Stephan},
     booktitle = {International Conference on Learning Representations (ICLR)},
     year = {2023}
 }
